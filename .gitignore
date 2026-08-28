@@ -1,0 +1,8 @@
+.nexa-private/
+
+tools/pipgen-venv/
+tools/flatpak-builder-tools/
+build-dir/
+.flatpak-builder/
+__pycache__/
+*.pyc

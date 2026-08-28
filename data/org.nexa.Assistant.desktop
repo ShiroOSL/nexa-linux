@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Nexa Assistant
+Comment=Your personal assistant
+Exec=nexa
+Icon=org.nexa.Assistant
+Terminal=false
+Categories=Utility;

@@ -1,0 +1,133 @@
+{
+  "app-id": "org.nexa.Assistant",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "50",
+  "sdk": "org.gnome.Sdk",
+  "command": "nexa",
+  "finish-args": [
+    "--socket=wayland",
+    "--socket=x11",
+    "--socket=pulseaudio",
+    "--device=dri",
+    "--filesystem=home",
+    "--share=network",
+    "--talk-name=org.freedesktop.Notifications",
+    "--talk-name=org.freedesktop.Flatpak",
+    "--talk-name=org.freedesktop.ScreenSaver",
+    "--talk-name=org.gnome.ScreenSaver",
+    "--talk-name=org.mpris.MediaPlayer2.*",
+    "--talk-name=org.kde.StatusNotifierWatcher",
+    "--talk-name=org.freedesktop.portal.*",
+    "--talk-name=org.nexa.NotificationBridge",
+    "--own-name=org.nexa.CommandRegistry",
+    "--talk-name=io.github.ShiroOSL.*",
+    "--system-talk-name=org.freedesktop.login1",
+    "--system-talk-name=org.freedesktop.UPower",
+    "--system-talk-name=org.freedesktop.NetworkManager",
+    "--system-talk-name=org.bluez",
+    "--env=PYTHONPATH=/app/lib/python3.13/site-packages"
+  ],
+  "modules": [
+    {
+      "name": "piper-tts",
+      "buildsystem": "simple",
+      "build-commands": [
+        "mkdir -p /app/lib/piper",
+        "cp -r * /app/lib/piper/",
+        "chmod +x /app/lib/piper/piper"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "path": "third_party/piper_linux_x86_64.tar.gz",
+          "sha256": "a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992"
+        }
+      ]
+    },
+    {
+      "name": "whisper-cpp",
+      "buildsystem": "cmake-ninja",
+      "config-opts": [
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DWHISPER_BUILD_EXAMPLES=ON",
+        "-DWHISPER_BUILD_TESTS=OFF",
+        "-DGGML_SSE42=ON",
+        "-DGGML_AVX=ON",
+        "-DGGML_AVX2=ON",
+        "-DGGML_FMA=ON",
+        "-DGGML_F16C=ON",
+        "-DGGML_BMI2=ON"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "path": "third_party/whisper.cpp-1.8.6.tar.gz",
+          "sha256": "f8e632016ceae556f3132a16c7f704be1e7715595041f474fa81a2b64c1abf7c"
+        }
+      ]
+    },
+    {
+      "name": "whisper-shim",
+      "buildsystem": "simple",
+      "build-commands": [
+        "gcc -shared -fPIC -O2 -I/app/include -o /app/lib/libnexa_whisper_shim.so nexa_whisper_shim.c -L/app/lib -lwhisper"
+      ],
+      "sources": [
+        {
+          "type": "file",
+          "path": "native/nexa_whisper_shim.c"
+        }
+      ]
+    },
+    {
+      "name": "openwakeword-deps",
+      "buildsystem": "simple",
+      "build-commands": [
+        "pip3 install --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} openwakeword==0.4.0"
+      ],
+      "sources": [
+        {"type": "file", "path": "third_party/openwakeword-wheels/openwakeword-0.4.0-py3-none-any.whl", "sha256": "2c353f49a35d384507403efde3db439353d8281a52d08a0e42a5b493e5145075"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/onnxruntime-1.28.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "54fa221d669282bd8f582708ce4c96010a7e9fb0661f9006b37fe2fedafb73fe"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/scikit_learn-1.9.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "da76d09304a4706db7cc1e3ebaa3b6b98a67365cc11d2996c4f1e58ba47df714"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/scipy-1.18.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "a46f9273dbd0eb1cefba61c9b8648b4dfe3cbc14a080176f9a73e44b8336dc7f"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/numpy-2.5.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "9726558e8db4a5bf7929a70ae50f63abda4daf0efe810e3bfbab95976f75fc1a"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/tqdm-4.70.0-py3-none-any.whl", "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/joblib-1.5.3-py3-none-any.whl", "sha256": "5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/narwhals-2.24.0-py3-none-any.whl", "sha256": "42fdedf44e5b2ca7505630d45b4ac3058f38d8485cba9fe1652ca23152df7489"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/threadpoolctl-3.6.0-py3-none-any.whl", "sha256": "43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/flatbuffers-25.12.19-py2.py3-none-any.whl", "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/protobuf-7.35.1-py3-none-any.whl", "sha256": "4bc97768d8fe4ad6743c8a19403e314511ed9f6d13205b687e52421c023ac1b9"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/packaging-26.2-py3-none-any.whl", "sha256": "5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e"}
+      ]
+    },
+    {
+      "name": "nexa-assistant",
+      "buildsystem": "simple",
+      "build-commands": [
+        "mkdir -p /app/bin /app/share/nexa /app/share/nexa/voices /app/share/nexa/whisper-models /app/share/nexa/wakeword-models /app/share/nexa/sounds /app/share/nexa/weather-icons",
+        "cp -r src/* /app/share/nexa/",
+        "cp -r data/voices/* /app/share/nexa/voices/",
+        "cp -r data/whisper-models/* /app/share/nexa/whisper-models/",
+        "cp -r data/wakeword-models/* /app/share/nexa/wakeword-models/",
+        "cp -r data/sounds/* /app/share/nexa/sounds/",
+        "cp -r data/weather-icons/* /app/share/nexa/weather-icons/",
+        
+        "echo '#!/bin/sh' > /app/bin/nexa",
+        "echo 'exec python3 /app/share/nexa/main.py \"$@\"' >> /app/bin/nexa",
+        "chmod +x /app/bin/nexa",
+
+        "mkdir -p /app/share/applications /app/share/icons/hicolor/scalable/apps",
+        "install -Dm644 data/org.nexa.Assistant.desktop /app/share/applications/org.nexa.Assistant.desktop",
+        "install -Dm644 data/org.nexa.Assistant.svg /app/share/icons/hicolor/scalable/apps/org.nexa.Assistant.svg"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": ".",
+          "skip": ["tools", "build-dir", ".flatpak-builder", ".git", "__pycache__"]
+        }
+      ]
+    }
+  ]
+}
