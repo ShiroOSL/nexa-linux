@@ -116,12 +116,22 @@
       ]
     },
     {
+      "name": "whisper-model",
+      "buildsystem": "simple",
+      "build-commands": [
+        "mkdir -p /app/share/nexa/whisper-models",
+        "cp ggml-tiny.en.bin /app/share/nexa/whisper-models/"
+      ],
+      "sources": [
+        {"type": "file", "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin", "sha256": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f"}
+      ]
+    },
+    {
       "name": "nexa-assistant",
       "buildsystem": "simple",
       "build-commands": [
-        "mkdir -p /app/bin /app/share/nexa /app/share/nexa/whisper-models /app/share/nexa/wakeword-models /app/share/nexa/sounds /app/share/nexa/weather-icons",
+        "mkdir -p /app/bin /app/share/nexa /app/share/nexa/wakeword-models /app/share/nexa/sounds /app/share/nexa/weather-icons",
         "cp -r src/* /app/share/nexa/",
-        "cp -r data/whisper-models/* /app/share/nexa/whisper-models/",
         "cp -r data/wakeword-models/* /app/share/nexa/wakeword-models/",
         "cp -r data/sounds/* /app/share/nexa/sounds/",
         "cp -r data/weather-icons/* /app/share/nexa/weather-icons/",
