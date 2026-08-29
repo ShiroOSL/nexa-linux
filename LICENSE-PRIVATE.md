@@ -1,7 +1,14 @@
 # Proprietary Notice — Private Assets
 
-Files distributed or referenced under `.nexa-private/` (wake-word models,
-voice/STT models, and associated command/training logic) are:
+The following files (wake-word models, voice/STT models, and associated
+command/training logic) are excluded from the GPL-3.0 license below:
+
+- `data/voices/*`
+- `data/whisper-models/*`
+- `data/wakeword-models/*`
+- `src/commands.py`
+- `src/nexa_studio_commands.py`
+- `src/training_data.py`
 
 Copyright (c) 2026 ShiroOSL. All Rights Reserved.
 
