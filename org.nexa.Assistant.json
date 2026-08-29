@@ -39,7 +39,7 @@
       "sources": [
         {
           "type": "archive",
-          "path": "third_party/piper_linux_x86_64.tar.gz",
+          "url": "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz",
           "sha256": "a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992"
         }
       ]
@@ -62,7 +62,7 @@
       "sources": [
         {
           "type": "archive",
-          "path": "third_party/whisper.cpp-1.8.6.tar.gz",
+          "url": "https://github.com/ggerganov/whisper.cpp/archive/refs/tags/v1.8.6.tar.gz",
           "sha256": "f8e632016ceae556f3132a16c7f704be1e7715595041f474fa81a2b64c1abf7c"
         }
       ]
@@ -87,18 +87,18 @@
         "pip3 install --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} openwakeword==0.4.0"
       ],
       "sources": [
-        {"type": "file", "path": "third_party/openwakeword-wheels/openwakeword-0.4.0-py3-none-any.whl", "sha256": "2c353f49a35d384507403efde3db439353d8281a52d08a0e42a5b493e5145075"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/onnxruntime-1.28.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "54fa221d669282bd8f582708ce4c96010a7e9fb0661f9006b37fe2fedafb73fe"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/scikit_learn-1.9.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "da76d09304a4706db7cc1e3ebaa3b6b98a67365cc11d2996c4f1e58ba47df714"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/scipy-1.18.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "a46f9273dbd0eb1cefba61c9b8648b4dfe3cbc14a080176f9a73e44b8336dc7f"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/numpy-2.5.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "9726558e8db4a5bf7929a70ae50f63abda4daf0efe810e3bfbab95976f75fc1a"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/tqdm-4.70.0-py3-none-any.whl", "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/joblib-1.5.3-py3-none-any.whl", "sha256": "5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/narwhals-2.24.0-py3-none-any.whl", "sha256": "42fdedf44e5b2ca7505630d45b4ac3058f38d8485cba9fe1652ca23152df7489"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/threadpoolctl-3.6.0-py3-none-any.whl", "sha256": "43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/flatbuffers-25.12.19-py2.py3-none-any.whl", "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/protobuf-7.35.1-py3-none-any.whl", "sha256": "4bc97768d8fe4ad6743c8a19403e314511ed9f6d13205b687e52421c023ac1b9"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/packaging-26.2-py3-none-any.whl", "sha256": "5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e"}
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/18/0f/6b22ebf0808363d0c71f7e5d0880b1c13c6a2cdcae2dc2cb8adfbdbcc278/openwakeword-0.4.0-py3-none-any.whl", "sha256": "2c353f49a35d384507403efde3db439353d8281a52d08a0e42a5b493e5145075"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/78/b6/8c5396e7894e77c5a7d1e026f3acb9dd39c4b5644e412e37a0055eaa3bc5/onnxruntime-1.28.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "54fa221d669282bd8f582708ce4c96010a7e9fb0661f9006b37fe2fedafb73fe"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/1f/88/8dab5de10c638c083772a6be83a3d8106ced492f74a928c8693638e5bb50/scikit_learn-1.9.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "da76d09304a4706db7cc1e3ebaa3b6b98a67365cc11d2996c4f1e58ba47df714"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/f6/af/e8fe5fb136f51e2b01678b92cb4106d10d8cd68ec147ead2e7cb0ac75398/scipy-1.18.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "a46f9273dbd0eb1cefba61c9b8648b4dfe3cbc14a080176f9a73e44b8336dc7f"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/2e/20/1ee6614d64332a1bba6411f38e68cb79eec1b2459e20a623777c5c5492a2/numpy-2.5.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "9726558e8db4a5bf7929a70ae50f63abda4daf0efe810e3bfbab95976f75fc1a"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/f9/1c/01bfd571a64e7f270e6bab5e33777debe0edc56759233ce84f27dec92d14/tqdm-4.70.0-py3-none-any.whl", "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/7b/91/984aca2ec129e2757d1e4e3c81c3fcda9d0f85b74670a094cc443d9ee949/joblib-1.5.3-py3-none-any.whl", "sha256": "5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/7e/85/a5bfaebfd305ac18b57b0854d74e37e586809061a91fda62f0bd50c8518e/narwhals-2.24.0-py3-none-any.whl", "sha256": "42fdedf44e5b2ca7505630d45b4ac3058f38d8485cba9fe1652ca23152df7489"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl", "sha256": "43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl", "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/e4/be/5b3cfe508bfab6761414ff944e3366eb13be4fd71efcd69450f89ba39f43/protobuf-7.35.1-cp310-abi3-manylinux2014_x86_64.whl", "sha256": "74758715c53d7158fb76caf4f0cfdacc5329a4b1bb994f865d6cf302d413a1c4"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl", "sha256": "5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e"}
       ]
     },
     {
