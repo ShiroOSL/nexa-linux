@@ -79,7 +79,11 @@ are all welcome.
 The application code in this repository is licensed under
 [GPL-3.0](LICENSE).
 
-A small set of files — the wake-word/voice/STT models and the custom
-command logic in `src/commands.py`, `src/nexa_studio_commands.py`, and
+A small set of files — Nexa's custom wake-word model and the command
+logic in `src/commands.py`, `src/nexa_studio_commands.py`, and
 `src/training_data.py` — are **not** covered by the GPL-3.0 license.
 See [LICENSE-PRIVATE.md](LICENSE-PRIVATE.md) for their terms.
+
+Nexa also bundles or downloads several third-party models and
+components (Whisper, Piper voices, openWakeWord) under their own
+original licenses — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
