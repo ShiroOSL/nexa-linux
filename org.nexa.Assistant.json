@@ -102,12 +102,25 @@
       ]
     },
     {
+      "name": "piper-voices",
+      "buildsystem": "simple",
+      "build-commands": [
+        "mkdir -p /app/share/nexa/voices",
+        "cp en_US-amy-medium.onnx en_US-amy-medium.onnx.json en_US-ryan-medium.onnx en_US-ryan-medium.onnx.json /app/share/nexa/voices/"
+      ],
+      "sources": [
+        {"type": "file", "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/amy/medium/en_US-amy-medium.onnx", "sha256": "b3a6e47b57b8c7fbe6a0ce2518161a50f59a9cdd8a50835c02cb02bdd6206c18"},
+        {"type": "file", "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/amy/medium/en_US-amy-medium.onnx.json", "sha256": "95a23eb4d42909d38df73bb9ac7f45f597dbfcde2d1bf9526fdeaf5466977d77"},
+        {"type": "file", "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/medium/en_US-ryan-medium.onnx", "sha256": "abf4c274862564ed647ba0d2c47f8ee7c9b717d27bdad9219100eb310db4047a"},
+        {"type": "file", "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/medium/en_US-ryan-medium.onnx.json", "sha256": "44034c056cb15681b2ad494307c7f3f2e4499d1253c700c711fa0a4607ffe78d"}
+      ]
+    },
+    {
       "name": "nexa-assistant",
       "buildsystem": "simple",
       "build-commands": [
-        "mkdir -p /app/bin /app/share/nexa /app/share/nexa/voices /app/share/nexa/whisper-models /app/share/nexa/wakeword-models /app/share/nexa/sounds /app/share/nexa/weather-icons",
+        "mkdir -p /app/bin /app/share/nexa /app/share/nexa/whisper-models /app/share/nexa/wakeword-models /app/share/nexa/sounds /app/share/nexa/weather-icons",
         "cp -r src/* /app/share/nexa/",
-        "cp -r data/voices/* /app/share/nexa/voices/",
         "cp -r data/whisper-models/* /app/share/nexa/whisper-models/",
         "cp -r data/wakeword-models/* /app/share/nexa/wakeword-models/",
         "cp -r data/sounds/* /app/share/nexa/sounds/",

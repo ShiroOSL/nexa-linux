@@ -1,14 +1,16 @@
 # Proprietary Notice — Private Assets
 
-The following files (wake-word models, voice/STT models, and associated
-command/training logic) are excluded from the GPL-3.0 license below:
+The following files (the wake-word model and associated command/training
+logic) are excluded from the GPL-3.0 license below:
 
-- `data/voices/*`
-- `data/whisper-models/*`
-- `data/wakeword-models/*`
+- `data/wakeword-models/hey_nexa.onnx`
 - `src/commands.py`
 - `src/nexa_studio_commands.py`
 - `src/training_data.py`
+
+Note: `data/whisper-models/*` and the Piper voice models are third-party
+files (whisper.cpp / rhasspy piper-voices), used under their own
+respective licenses, and are not covered by this notice.
 
 Copyright (c) 2026 ShiroOSL. All Rights Reserved.
 
