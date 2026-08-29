@@ -125,7 +125,7 @@
         {
           "type": "dir",
           "path": ".",
-          "skip": ["tools", "build-dir", ".flatpak-builder", ".git", "__pycache__"]
+          "skip": ["tools", "build-dir", ".flatpak-builder", ".git", "__pycache__", "docs", "README.md", ".github", "LICENSE", "LICENSE-PRIVATE.md", ".gitignore", "setup.sh"]
         }
       ]
     }
