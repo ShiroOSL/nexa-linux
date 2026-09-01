@@ -4,7 +4,8 @@ set -e
 
 REPO_URL="https://github.com/ShiroOSL/nexa-linux.git"
 APP_ID="org.nexa.Assistant"
-WORKDIR="$(mktemp -d /tmp/nexa-setup.XXXXXX)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKDIR=""
 
 # ---------- helpers ----------
 
@@ -12,8 +13,15 @@ is_installed() {
     flatpak info "$APP_ID" >/dev/null 2>&1
 }
 
+# True if this script is sitting inside an existing local checkout
+# of the repo (i.e. the manifest is right next to it), so we can
+# build in place instead of re-cloning from GitHub.
+using_local_checkout() {
+    [[ -f "$SCRIPT_DIR/$APP_ID.json" ]]
+}
+
 cleanup() {
-    rm -rf "$WORKDIR"
+    [[ -n "$WORKDIR" ]] && rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
 
@@ -43,9 +51,15 @@ install_builder_if_missing() {
 
 do_build_and_install() {
     echo ""
-    echo "Fetching Nexa Assistant..."
-    git clone --depth 1 "$REPO_URL" "$WORKDIR/nexa-linux"
-    cd "$WORKDIR/nexa-linux"
+    if using_local_checkout; then
+        echo "Using local checkout at $SCRIPT_DIR"
+        cd "$SCRIPT_DIR"
+    else
+        echo "Fetching Nexa Assistant..."
+        WORKDIR="$(mktemp -d /tmp/nexa-setup.XXXXXX)"
+        git clone --depth 1 "$REPO_URL" "$WORKDIR/nexa-linux"
+        cd "$WORKDIR/nexa-linux"
+    fi
 
     install_flatpak_if_missing
     echo "Installing GNOME SDK/Platform..."
@@ -66,6 +80,13 @@ do_install() {
 
 do_update() {
     echo "Updating Nexa Assistant to the latest version..."
+    if using_local_checkout && [[ -d "$SCRIPT_DIR/.git" ]]; then
+        echo "Pulling latest changes into $SCRIPT_DIR..."
+        git -C "$SCRIPT_DIR" pull --ff-only || {
+            echo "Could not fast-forward local checkout (local changes?)."
+            echo "Rebuilding with what's currently on disk instead."
+        }
+    fi
     do_build_and_install
 }
 
