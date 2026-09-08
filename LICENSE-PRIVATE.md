@@ -1,24 +1,11 @@
-# Proprietary Notice — Private Assets
+# Deprecated
 
-The following files (the wake-word model and associated command/training
-logic) are excluded from the GPL-3.0 license below:
+As of v1.1.0, this file no longer applies. All source files in this
+repository, including `src/commands.py`, `src/nexa_studio_commands.py`,
+and `src/training_data.py`, are licensed under GPL-3.0 (see LICENSE).
 
-- `data/wakeword-models/hey_nexa.onnx`
-- `src/commands.py`
-- `src/nexa_studio_commands.py`
-- `src/training_data.py`
+The "Nexa" name and logo remain protected as trademarks — see
+[TRADEMARKS.md](TRADEMARKS.md).
 
-Note: other bundled or downloaded models (Whisper, Piper voices, and
-openWakeWord's shared embedding/melspectrogram models) are third-party
-components under their own licenses — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
-
-Copyright (c) 2026 ShiroOSL. All Rights Reserved.
-
-These files are **NOT** licensed under the GPL-3.0 license that covers
-the rest of this repository. No permission is granted to copy, modify,
-redistribute, reverse-engineer, or use these files — in whole or in
-part — outside of running the official Nexa Assistant application,
-without prior written permission from the copyright holder.
-
-This notice exists to establish legal ownership. It does not grant
-any license or usage rights beyond normal use of the packaged app.
+This file is kept only for historical reference and will be removed
+in a future release.

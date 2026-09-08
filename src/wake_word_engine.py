@@ -90,6 +90,7 @@ class WakeWordEngine:
         self._base_threshold = DEFAULT_THRESHOLD
         self._threshold = DEFAULT_THRESHOLD
         self._lock = threading.Lock()
+        self._last_predict_error = 0.0
 
     def set_threshold(self, sensitivity_key):
         """Applies a sensitivity preset ("low"/"medium"/"high"). Takes effect
@@ -211,7 +212,15 @@ class WakeWordEngine:
             import numpy as np
             samples = np.frombuffer(chunk_bytes, dtype=np.int16)
             predictions = self._model.predict(samples)
-        except Exception:
+        except Exception as e:
+            # Was a silent `except Exception: return` -- any prediction
+            # failure meant the listener looked "on" forever while doing
+            # nothing, with zero visibility. Surface it (throttled so a
+            # persistent failure doesn't spam) instead of swallowing it.
+            now = time.monotonic()
+            if (now - self._last_predict_error) > 10.0:
+                self._last_predict_error = now
+                self.on_error(f"Wake word prediction failed: {e}")
             return
 
         now = time.monotonic()

@@ -2,21 +2,59 @@
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gio, GLib
+from gi.repository import Gtk, Adw, GLib, Gdk
 
+import html
 import nexa_studio_commands as studio
+
+
+def add_press_bounce(button, min_scale=0.9):
+    """Spring squash/stretch on press+release. Duplicated from main.py's
+    module-level helper of the same name (not imported, to avoid a
+    main.py <-> nexa_studio.py circular import -- main.py imports this
+    module at startup). Keep behavior identical if either changes."""
+    node_name = f"nexa-bounce-{id(button)}"
+    button.set_name(node_name)
+    provider = Gtk.CssProvider()
+
+    def _apply_scale(scale):
+        provider.load_from_data(f"#{node_name} {{ transform: scale({scale:.3f}); }}".encode())
+
+    Gtk.StyleContext.add_provider_for_display(
+        Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+    _apply_scale(1.0)
+    spring_params = Adw.SpringParams.new(0.55, 1.0, 500.0)
+
+    def _settle_to(target):
+        start = getattr(button, "_bounce_scale", 1.0)
+        spring = Adw.SpringAnimation.new(
+            button, start, target, spring_params,
+            Adw.CallbackAnimationTarget.new(_apply_scale),
+        )
+        spring.connect("done", lambda *_a: setattr(button, "_bounce_scale", target))
+        spring.play()
+
+    click = Gtk.GestureClick.new()
+    click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    click.connect("pressed", lambda *_a: _settle_to(min_scale))
+    click.connect("released", lambda *_a: _settle_to(1.0))
+    click.connect("cancel", lambda *_a: _settle_to(1.0))
+    button.add_controller(click)
 
 
 class NexaStudioWindow(Adw.ApplicationWindow):
     def __init__(self, application, on_close_return_home, engine=None, voice=None):
         super().__init__(application=application)
-        self.set_default_size(920, 640)
+        self.set_default_size(940, 660)
         self.set_title("Nexa Studio")
         self._on_close_return_home = on_close_return_home
         self._engine = engine
         self._voice = voice
         self._editing_id = None
         self._command_rows = []
+        self._hero_anims = []
+        self._action_type = "say"  # "say" | "run" -- driven by the picker cards
 
         self._load_css()
 
@@ -33,23 +71,23 @@ class NexaStudioWindow(Adw.ApplicationWindow):
         self.set_content(self.toast_overlay)
         self.connect("close-request", self._on_close_request)
         self._refresh_list()
+        GLib.idle_add(self._animate_hero_entrance)
 
     # ---------------------------------------------------------------- styling
     def _load_css(self):
         css = Gtk.CssProvider()
+        # .nexa-hero-glow / .nexa-hero-icon copied verbatim from NexaWindow's
+        # hero page (main.py _build_entry_bar's CSS block) so Studio's hero
+        # matches the main chat window's glow exactly, not a re-derived copy.
         css.load_from_data(b"""
-            .studio-hero {
-                background: linear-gradient(135deg, alpha(#3584e4, 0.20), alpha(#9141ac, 0.12));
-                border-radius: 18px;
-                padding: 22px;
+            .nexa-hero-glow {
+                background: radial-gradient(circle, alpha(#3584e4, 0.38) 0%,
+                    alpha(#3584e4, 0.10) 45%, alpha(#3584e4, 0) 70%);
+                border-radius: 9999px;
             }
-            .studio-hero-icon {
-                background: alpha(#3584e4, 0.20);
-                border-radius: 999px;
-                min-width: 52px;
-                min-height: 52px;
+            .nexa-hero-icon {
+                filter: drop-shadow(0 6px 18px alpha(#3584e4, 0.4));
             }
-            .studio-hero-icon image { color: #3584e4; -gtk-icon-size: 26px; }
             .studio-row-icon {
                 border-radius: 999px;
                 min-width: 34px;
@@ -66,13 +104,36 @@ class NexaStudioWindow(Adw.ApplicationWindow):
             }
             .studio-empty-page { opacity: 0.85; }
             .studio-sidebar-scroll { background: transparent; }
-            preferencesgroup > list.boxed-list {
-                border-radius: 14px;
+
+            /* Colorful action-type picker: two big gradient cards instead of
+               a plain dropdown, echoing the same "gradient card" language
+               as the weather/music bubbles in the main chat window. */
+            .studio-type-card {
+                border-radius: 18px;
+                padding: 16px 14px;
+                min-height: 92px;
+                color: #ffffff;
             }
-            headerbar {
-                padding-left: 4px;
-                padding-right: 4px;
+            .studio-type-card-say {
+                background: linear-gradient(135deg, #4a91f0 0%, #3160c9 100%);
+                box-shadow: 0 4px 14px alpha(#1a4faf, 0.35);
             }
+            .studio-type-card-run {
+                background: linear-gradient(135deg, #3ddc97 0%, #1f9e6b 100%);
+                box-shadow: 0 4px 14px alpha(#137a4f, 0.35);
+            }
+            .studio-type-card-unselected {
+                background: alpha(currentColor, 0.06);
+                color: @window_fg_color;
+                box-shadow: none;
+            }
+            .studio-type-card:hover { filter: brightness(1.06); }
+            .studio-type-card-title { font-weight: 700; font-size: 14px; }
+            .studio-type-card-sub { font-size: 11px; opacity: 0.85; }
+            .studio-type-card image { color: inherit; }
+
+            preferencesgroup > list.boxed-list { border-radius: 14px; }
+            headerbar { padding-left: 4px; padding-right: 4px; }
             headerbar .title { font-weight: 700; }
         """)
         Gtk.StyleContext.add_provider_for_display(
@@ -93,8 +154,6 @@ class NexaStudioWindow(Adw.ApplicationWindow):
 
     # ---------------------------------------------------------------- sidebar
     def _build_sidebar(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-
         header = Adw.HeaderBar()
         header.set_show_end_title_buttons(False)
         header.set_show_title(False)
@@ -104,6 +163,7 @@ class NexaStudioWindow(Adw.ApplicationWindow):
         new_btn_content = Adw.ButtonContent(icon_name="list-add-symbolic", label="New")
         new_btn.set_child(new_btn_content)
         new_btn.connect("clicked", self._on_new_command)
+        add_press_bounce(new_btn)
         header.pack_end(new_btn)
 
         scrolled = Gtk.ScrolledWindow(vexpand=True)
@@ -161,12 +221,14 @@ class NexaStudioWindow(Adw.ApplicationWindow):
         self.delete_btn.add_css_class("flat")
         self.delete_btn.set_visible(False)
         self.delete_btn.connect("clicked", self._on_delete_clicked)
+        add_press_bounce(self.delete_btn)
         header.pack_start(self.delete_btn)
 
         save_btn = Gtk.Button(label="Save Command")
         save_btn.add_css_class("suggested-action")
         save_btn.add_css_class("pill")
         save_btn.connect("clicked", self._on_save_clicked)
+        add_press_bounce(save_btn)
         header.pack_end(save_btn)
 
         self.test_btn = Gtk.Button()
@@ -174,33 +236,52 @@ class NexaStudioWindow(Adw.ApplicationWindow):
         self.test_btn.add_css_class("pill")
         self.test_btn.set_tooltip_text("Run this command right now to check it works, without leaving Studio")
         self.test_btn.connect("clicked", self._on_test_clicked)
+        add_press_bounce(self.test_btn)
         header.pack_end(self.test_btn)
 
         page = Adw.PreferencesPage()
 
+        # --- Hero: identical glow-icon + staggered fade-in as NexaWindow's
+        # empty-chat hero page (main.py _build_hero_page / _animate_hero_entrance).
         hero = Adw.PreferencesGroup()
-        hero_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-        hero_box.add_css_class("studio-hero")
-        icon_wrap = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.START)
-        icon_wrap.add_css_class("studio-hero-icon")
-        hero_icon = Gtk.Image.new_from_icon_name("audio-input-microphone-symbolic")
+        hero_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        hero_box.set_halign(Gtk.Align.CENTER)
+        hero_box.set_margin_top(6)
+        hero_box.set_margin_bottom(20)
+
+        self.hero_glow = Gtk.Box()
+        self.hero_glow.add_css_class("nexa-hero-glow")
+        self.hero_glow.set_size_request(140, 140)
+        self.hero_glow.set_halign(Gtk.Align.CENTER)
+        self.hero_glow.set_valign(Gtk.Align.CENTER)
+
+        hero_icon = Gtk.Image.new_from_icon_name("star-new-symbolic")
+        hero_icon.set_pixel_size(56)
+        hero_icon.add_css_class("nexa-hero-icon")
         hero_icon.set_halign(Gtk.Align.CENTER)
         hero_icon.set_valign(Gtk.Align.CENTER)
-        hero_icon.set_hexpand(True)
-        hero_icon.set_vexpand(True)
-        icon_wrap.append(hero_icon)
-        hero_box.append(icon_wrap)
-        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, valign=Gtk.Align.CENTER)
-        title_lbl = Gtk.Label(label="Teach Nexa something new", xalign=0)
-        title_lbl.add_css_class("title-3")
-        sub_lbl = Gtk.Label(
+
+        icon_overlay = Gtk.Overlay()
+        icon_overlay.set_child(self.hero_glow)
+        icon_overlay.add_overlay(hero_icon)
+        icon_overlay.set_halign(Gtk.Align.CENTER)
+        hero_box.append(icon_overlay)
+
+        self.hero_title_lbl = Gtk.Label(label="Teach Nexa something new")
+        self.hero_title_lbl.add_css_class("title-2")
+        self.hero_title_lbl.set_opacity(0)
+        hero_box.append(self.hero_title_lbl)
+
+        self.hero_sub_lbl = Gtk.Label(
             label="Set a trigger phrase, then decide what Nexa does when she hears it.",
-            xalign=0, wrap=True,
+            wrap=True, justify=Gtk.Justification.CENTER,
         )
-        sub_lbl.add_css_class("dim-label")
-        text_box.append(title_lbl)
-        text_box.append(sub_lbl)
-        hero_box.append(text_box)
+        self.hero_sub_lbl.add_css_class("dim-label")
+        self.hero_sub_lbl.set_opacity(0)
+        hero_box.append(self.hero_sub_lbl)
+
+        self.hero_box = hero_box
+        hero_box.set_opacity(0)
         hero.add(hero_box)
         page.add(hero)
 
@@ -209,18 +290,33 @@ class NexaStudioWindow(Adw.ApplicationWindow):
         trigger_group.add(self.trigger_row)
         page.add(trigger_group)
 
-        type_group = Adw.PreferencesGroup(title="Action")
-        self.type_row = Adw.ComboRow(title="Nexa should")
-        self.type_row.set_model(Gtk.StringList.new(["Say a response", "Run a terminal command"]))
-        self.type_row.connect("notify::selected", self._on_type_changed)
-        type_group.add(self.type_row)
+        # --- Colorful type picker: two gradient cards (blue "Say", green
+        # "Run") the user taps, replacing the old plain ComboRow.
+        type_group = Adw.PreferencesGroup(title="Nexa should")
+        cards_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10, homogeneous=True)
+        cards_row.set_margin_top(4)
+        cards_row.set_margin_bottom(8)
 
+        self.say_card = self._build_type_card(
+            "chat-message-new-symbolic", "Say a response",
+            "Speak or show text back", "say",
+        )
+        self.run_card = self._build_type_card(
+            "utilities-terminal-symbolic", "Run a command",
+            "Execute a terminal command", "run",
+        )
+        cards_row.append(self.say_card)
+        cards_row.append(self.run_card)
+        type_group.add(cards_row)
+        page.add(type_group)
+
+        action_group = Adw.PreferencesGroup(title="Action")
         self.response_row = Adw.EntryRow(title="Response text")
-        type_group.add(self.response_row)
+        action_group.add(self.response_row)
 
         self.command_row = Adw.EntryRow(title="Terminal command")
         self.command_row.set_visible(False)
-        type_group.add(self.command_row)
+        action_group.add(self.command_row)
 
         self.speak_output_row = Adw.SwitchRow(
             title="Speak the command's output",
@@ -228,41 +324,120 @@ class NexaStudioWindow(Adw.ApplicationWindow):
         )
         self.speak_output_row.set_active(True)
         self.speak_output_row.set_visible(False)
-        type_group.add(self.speak_output_row)
+        action_group.add(self.speak_output_row)
 
-        page.add(type_group)
+        page.add(action_group)
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(header)
         toolbar_view.set_content(page)
         self.editor_page = Adw.NavigationPage(title="Command", child=toolbar_view)
+        self._refresh_type_cards()
         return self.editor_page
 
-    # ---------------------------------------------------------------- logic
-    def _on_type_changed(self, row, _param):
-        is_run = row.get_selected() == 1
+    def _build_type_card(self, icon_name, title, subtitle, kind):
+        card = Gtk.Button()
+        card.add_css_class("studio-type-card")
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        inner.set_halign(Gtk.Align.START)
+        icon = Gtk.Image.new_from_icon_name(icon_name)
+        icon.set_pixel_size(22)
+        inner.append(icon)
+        title_lbl = Gtk.Label(label=title, halign=Gtk.Align.START)
+        title_lbl.add_css_class("studio-type-card-title")
+        inner.append(title_lbl)
+        sub_lbl = Gtk.Label(label=subtitle, halign=Gtk.Align.START, wrap=True)
+        sub_lbl.add_css_class("studio-type-card-sub")
+        inner.append(sub_lbl)
+        card.set_child(inner)
+        card.connect("clicked", lambda _b, k=kind: self._on_type_card_clicked(k))
+        add_press_bounce(card, min_scale=0.96)
+        return card
+
+    def _on_type_card_clicked(self, kind):
+        self._action_type = kind
+        self._refresh_type_cards()
+        is_run = kind == "run"
         self.response_row.set_visible(not is_run)
         self.command_row.set_visible(is_run)
         self.speak_output_row.set_visible(is_run)
 
+    def _refresh_type_cards(self):
+        say_selected = self._action_type == "say"
+        for cls in ("studio-type-card-say", "studio-type-card-unselected"):
+            self.say_card.remove_css_class(cls)
+            self.run_card.remove_css_class(cls)
+        self.say_card.add_css_class("studio-type-card-say" if say_selected else "studio-type-card-unselected")
+        self.run_card.add_css_class("studio-type-card-run" if not say_selected else "studio-type-card-unselected")
+
+    # ---------------------------------------------------------------- hero animation
+    def _animate_hero_entrance(self):
+        """Staggered fade-in for the editor hero, matching NexaWindow's
+        _animate_hero_entrance easing/timing exactly (main.py)."""
+        fade_box = Adw.TimedAnimation.new(
+            self.hero_box, 0, 1, 550,
+            Adw.CallbackAnimationTarget.new(lambda v: self.hero_box.set_opacity(v)),
+        )
+        fade_box.set_easing(Adw.Easing.EASE_OUT_CUBIC)
+        fade_box.play()
+        self._hero_anims = [fade_box]
+
+        def fade_text(label, delay):
+            def start(*_a):
+                anim = Adw.TimedAnimation.new(
+                    label, 0, 1, 450,
+                    Adw.CallbackAnimationTarget.new(lambda v: label.set_opacity(v)),
+                )
+                anim.set_easing(Adw.Easing.EASE_OUT_CUBIC)
+                anim.play()
+                self._hero_anims.append(anim)
+            GLib.timeout_add(delay, lambda: (start(), False)[1])
+
+        fade_text(self.hero_title_lbl, 200)
+        fade_text(self.hero_sub_lbl, 350)
+
+        glow_pulse = Adw.TimedAnimation.new(
+            self.hero_glow, 0.55, 1.0, 1900,
+            Adw.CallbackAnimationTarget.new(lambda v: self.hero_glow.set_opacity(v)),
+        )
+        glow_pulse.set_easing(Adw.Easing.EASE_IN_OUT_SINE)
+        glow_pulse.set_repeat_count(0)
+        glow_pulse.set_alternate(True)
+        glow_pulse.play()
+        self._hero_anims.append(glow_pulse)
+        return False
+
+    # ---------------------------------------------------------------- logic
     def _clear_editor(self):
         self._editing_id = None
         self.trigger_row.set_text("")
         self.response_row.set_text("")
         self.command_row.set_text("")
-        self.type_row.set_selected(0)
+        self._action_type = "say"
+        self._refresh_type_cards()
+        self.response_row.set_visible(True)
+        self.command_row.set_visible(False)
+        self.speak_output_row.set_visible(False)
         self.speak_output_row.set_active(True)
         self.delete_btn.set_visible(False)
+        self.hero_title_lbl.set_label("Teach Nexa something new")
+        self.hero_sub_lbl.set_label("Set a trigger phrase, then decide what Nexa does when she hears it.")
 
     def _load_into_editor(self, cmd):
         self._editing_id = cmd["id"]
         self.trigger_row.set_text(cmd.get("trigger", ""))
         is_run = cmd.get("type") == "run"
-        self.type_row.set_selected(1 if is_run else 0)
+        self._action_type = "run" if is_run else "say"
+        self._refresh_type_cards()
         self.response_row.set_text(cmd.get("response", ""))
+        self.response_row.set_visible(not is_run)
         self.command_row.set_text(cmd.get("shell_command", ""))
+        self.command_row.set_visible(is_run)
         self.speak_output_row.set_active(cmd.get("speak_output", True))
+        self.speak_output_row.set_visible(is_run)
         self.delete_btn.set_visible(True)
+        self.hero_title_lbl.set_label("Edit this command")
+        self.hero_sub_lbl.set_label("Update the trigger or what Nexa does, then save.")
         self.split.set_content(self.editor_page)
 
     def _on_new_command(self, _btn):
@@ -283,7 +458,11 @@ class NexaStudioWindow(Adw.ApplicationWindow):
             return
         for cmd in commands:
             subtitle = cmd.get("response") if cmd.get("type") == "say" else cmd.get("shell_command")
-            row = Adw.ActionRow(title=cmd.get("trigger", ""), subtitle=subtitle or "")
+            # Escaped: a user-typed trigger/response containing "&"/"<"/">"
+            # would otherwise be invalid Pango markup and silently blank
+            # the row's title entirely, the same bug as the Settings
+            # Command Access rows (see main.py for the full writeup).
+            row = Adw.ActionRow(title=html.escape(cmd.get("trigger", "")), subtitle=html.escape(subtitle or ""))
             row.set_title_lines(1)
             row.set_subtitle_lines(1)
             is_say = cmd.get("type") == "say"
@@ -297,12 +476,13 @@ class NexaStudioWindow(Adw.ApplicationWindow):
     def _populate_recommendations(self):
         for rec in studio.RECOMMENDATIONS:
             subtitle = rec.get("response") if rec.get("type") == "say" else rec.get("shell_command")
-            row = Adw.ActionRow(title=rec["trigger"], subtitle=subtitle or "")
+            row = Adw.ActionRow(title=html.escape(rec["trigger"]), subtitle=html.escape(subtitle or ""))
             row.set_title_lines(1)
             row.set_subtitle_lines(1)
             row.add_css_class("studio-rec-row")
             add_btn = Gtk.Button(icon_name="list-add-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Add")
             add_btn.connect("clicked", lambda _b, r=rec: self._add_recommendation(r))
+            add_press_bounce(add_btn)
             row.add_suffix(add_btn)
             self.rec_group.add(row)
 
@@ -331,7 +511,7 @@ class NexaStudioWindow(Adw.ApplicationWindow):
             self.toast_overlay.add_toast(Adw.Toast(title="Test isn't available right now"))
             return
 
-        is_run = self.type_row.get_selected() == 1
+        is_run = self._action_type == "run"
         self.test_btn.set_sensitive(False)
 
         if not is_run:
@@ -378,7 +558,7 @@ class NexaStudioWindow(Adw.ApplicationWindow):
             return
         self.trigger_row.remove_css_class("error")
 
-        is_run = self.type_row.get_selected() == 1
+        is_run = self._action_type == "run"
         cmd_type = "run" if is_run else "say"
         response = self.response_row.get_text()
         shell_command = self.command_row.get_text()

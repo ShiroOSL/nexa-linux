@@ -1,6 +1,3 @@
-# Copyright (c) 2026 ShiroOSL. All Rights Reserved.
-# This file is proprietary and NOT covered by the repo's GPL-3.0 license.
-# See LICENSE-PRIVATE.md.
 """Nexa Studio: user-defined custom commands.
 
 Each command is a dict:

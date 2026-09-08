@@ -9,8 +9,10 @@
     "--socket=x11",
     "--socket=pulseaudio",
     "--device=dri",
-    "--filesystem=home",
+    "--filesystem=xdg-config/nexa:create",
+    "--filesystem=xdg-data/nexa:create",
     "--share=network",
+    "--env=GSK_RENDERER=gl",
     "--talk-name=org.freedesktop.Notifications",
     "--talk-name=org.freedesktop.Flatpak",
     "--talk-name=org.freedesktop.ScreenSaver",
@@ -51,14 +53,27 @@
         "-DCMAKE_BUILD_TYPE=Release",
         "-DBUILD_SHARED_LIBS=ON",
         "-DWHISPER_BUILD_EXAMPLES=ON",
-        "-DWHISPER_BUILD_TESTS=OFF",
-        "-DGGML_SSE42=ON",
-        "-DGGML_AVX=ON",
-        "-DGGML_AVX2=ON",
-        "-DGGML_FMA=ON",
-        "-DGGML_F16C=ON",
-        "-DGGML_BMI2=ON"
+        "-DWHISPER_BUILD_TESTS=OFF"
       ],
+      "build-options": {
+        "arch": {
+          "x86_64": {
+            "config-opts": [
+              "-DGGML_SSE42=ON",
+              "-DGGML_AVX=ON",
+              "-DGGML_AVX2=ON",
+              "-DGGML_FMA=ON",
+              "-DGGML_F16C=ON",
+              "-DGGML_BMI2=ON"
+            ]
+          },
+          "aarch64": {
+            "config-opts": [
+              "-DGGML_NATIVE=OFF"
+            ]
+          }
+        }
+      },
       "sources": [
         {
           "type": "archive",
@@ -81,6 +96,26 @@
       ]
     },
     {
+      "name": "pyenchant",
+      "buildsystem": "simple",
+      "build-commands": [
+        "pip3 install --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} pyenchant==3.3.0"
+      ],
+      "sources": [
+        {"type": "file", "path": "third_party/pyenchant-wheel/pyenchant-3.3.0-py3-none-any.whl", "sha256": "3da00b1d01314d85aac733bb997415d7a3e875666dc81735ddcf320aa36b7a70"}
+      ]
+    },
+    {
+      "name": "mutagen",
+      "buildsystem": "simple",
+      "build-commands": [
+        "pip3 install --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} mutagen==1.48.1"
+      ],
+      "sources": [
+        {"type": "file", "path": "third_party/mutagen-wheel/mutagen-1.48.1-py3-none-any.whl", "sha256": "4f077fe87d3fc7fba259aa63d8c026b18382ca6a42ef37c61e16f1b1b5b82fe7"}
+      ]
+    },
+    {
       "name": "openwakeword-deps",
       "buildsystem": "simple",
       "build-commands": [
@@ -88,10 +123,14 @@
       ],
       "sources": [
         {"type": "file", "path": "third_party/openwakeword-wheels/openwakeword-0.4.0-py3-none-any.whl", "sha256": "2c353f49a35d384507403efde3db439353d8281a52d08a0e42a5b493e5145075"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/onnxruntime-1.28.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "54fa221d669282bd8f582708ce4c96010a7e9fb0661f9006b37fe2fedafb73fe"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/scikit_learn-1.9.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "da76d09304a4706db7cc1e3ebaa3b6b98a67365cc11d2996c4f1e58ba47df714"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/scipy-1.18.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "a46f9273dbd0eb1cefba61c9b8648b4dfe3cbc14a080176f9a73e44b8336dc7f"},
-        {"type": "file", "path": "third_party/openwakeword-wheels/numpy-2.5.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "9726558e8db4a5bf7929a70ae50f63abda4daf0efe810e3bfbab95976f75fc1a"},
+        {"type": "file", "path": "third_party/openwakeword-wheels/onnxruntime-1.28.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "54fa221d669282bd8f582708ce4c96010a7e9fb0661f9006b37fe2fedafb73fe", "only-arches": ["x86_64"]},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/c0/23/b46045c3bf67a9cf54c12f5df0f018a422c65fbb9d6072b10071bebfaae2/onnxruntime-1.28.0-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", "sha256": "f649dd6f6452d12a8059888aa489fe519e062e18793dac72b9efa0f9fdb64135", "only-arches": ["aarch64"]},
+        {"type": "file", "path": "third_party/openwakeword-wheels/scikit_learn-1.9.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "da76d09304a4706db7cc1e3ebaa3b6b98a67365cc11d2996c4f1e58ba47df714", "only-arches": ["x86_64"]},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/0c/39/ffe829a5b8ecb40a518724a997794657fdc354ada5e8fe8e64d998c0bac9/scikit_learn-1.9.0-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", "sha256": "38c3dcb9a1ffb85505ec53d54c7b4aea0cff70050425a7760c2af661ac85df05", "only-arches": ["aarch64"]},
+        {"type": "file", "path": "third_party/openwakeword-wheels/scipy-1.18.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "a46f9273dbd0eb1cefba61c9b8648b4dfe3cbc14a080176f9a73e44b8336dc7f", "only-arches": ["x86_64"]},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/ea/b2/e83ea34279a52c03374477c74006256ec78df65fc877baa4617d6de1d202/scipy-1.18.0-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", "sha256": "0d13bca67c096d89fb95ced0d8921807300fce0275643aef9533cc63a0773468", "only-arches": ["aarch64"]},
+        {"type": "file", "path": "third_party/openwakeword-wheels/numpy-2.5.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", "sha256": "9726558e8db4a5bf7929a70ae50f63abda4daf0efe810e3bfbab95976f75fc1a", "only-arches": ["x86_64"]},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/2e/20/1ee6614d64332a1bba6411f38e68cb79eec1b2459e20a623777c5c5492a2/numpy-2.5.1-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", "sha256": "1c6759f538fb912fc46de0a6b1758ccf7b57bc7c7ebebc23974fdac3de8db0cd", "only-arches": ["aarch64"]},
         {"type": "file", "path": "third_party/openwakeword-wheels/tqdm-4.70.0-py3-none-any.whl", "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"},
         {"type": "file", "path": "third_party/openwakeword-wheels/joblib-1.5.3-py3-none-any.whl", "sha256": "5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713"},
         {"type": "file", "path": "third_party/openwakeword-wheels/narwhals-2.24.0-py3-none-any.whl", "sha256": "42fdedf44e5b2ca7505630d45b4ac3058f38d8485cba9fe1652ca23152df7489"},
@@ -135,20 +174,25 @@
         "cp -r data/wakeword-models/* /app/share/nexa/wakeword-models/",
         "cp -r data/sounds/* /app/share/nexa/sounds/",
         "cp -r data/weather-icons/* /app/share/nexa/weather-icons/",
-        
+
         "echo '#!/bin/sh' > /app/bin/nexa",
         "echo 'exec python3 /app/share/nexa/main.py \"$@\"' >> /app/bin/nexa",
         "chmod +x /app/bin/nexa",
 
-        "mkdir -p /app/share/applications /app/share/icons/hicolor/scalable/apps",
+        "mkdir -p /app/share/applications /app/share/icons/hicolor/scalable/apps /app/share/metainfo",
         "install -Dm644 data/org.nexa.Assistant.desktop /app/share/applications/org.nexa.Assistant.desktop",
-        "install -Dm644 data/org.nexa.Assistant.svg /app/share/icons/hicolor/scalable/apps/org.nexa.Assistant.svg"
+        "install -Dm644 data/org.nexa.Assistant.svg /app/share/icons/hicolor/scalable/apps/org.nexa.Assistant.svg",
+        "install -Dm644 data/org.nexa.Assistant.metainfo.xml /app/share/metainfo/org.nexa.Assistant.metainfo.xml",
+
+        "install -Dm644 LICENSE /app/share/doc/nexa/LICENSE",
+        "install -Dm644 LICENSE-PRIVATE.md /app/share/doc/nexa/LICENSE-PRIVATE.md",
+        "install -Dm644 TRADEMARKS.md /app/share/doc/nexa/TRADEMARKS.md"
       ],
       "sources": [
         {
           "type": "dir",
           "path": ".",
-          "skip": ["tools", "build-dir", ".flatpak-builder", ".git", "__pycache__", "docs", "README.md", ".github", "LICENSE", "LICENSE-PRIVATE.md", ".gitignore", "setup.sh"]
+          "skip": ["tools", "build-dir", ".flatpak-builder", ".git", "__pycache__", "docs", "README.md", ".github", ".gitignore", "setup.sh", "third_party"]
         }
       ]
     }

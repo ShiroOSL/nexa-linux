@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.nexa.Assistant</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Nexa Assistant</name>
+  <summary>Local-first voice assistant for the Linux desktop</summary>
+
+  <description>
+    <p>
+      Nexa is a local-first voice assistant built for Linux. Say "Hey Nexa"
+      and it listens, understands, and talks back — all running on your own
+      machine, with speech recognition, wake-word detection, and
+      text-to-speech handled locally rather than sent to the cloud.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Always-on "Hey Nexa" wake word with adjustable sensitivity</li>
+      <li>Local speech-to-text and natural-sounding text-to-speech</li>
+      <li>Weather, jokes, facts, riddles, and system controls</li>
+      <li>Nexa Studio: build your own custom voice commands</li>
+      <li>Connects to other apps on your system via D-Bus</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">org.nexa.Assistant.desktop</launchable>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Talking with Nexa</caption>
+      <image>https://raw.githubusercontent.com/ShiroOSL/nexa-linux/main/docs/screenshots/hero.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>A conversation with Nexa</caption>
+      <image>https://raw.githubusercontent.com/ShiroOSL/nexa-linux/main/docs/screenshots/conversation.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Weather card</caption>
+      <image>https://raw.githubusercontent.com/ShiroOSL/nexa-linux/main/docs/screenshots/weather-card.png</image>
+    </screenshot>
+  </screenshots>
+
+  <url type="homepage">https://github.com/ShiroOSL/nexa-linux</url>
+  <url type="bugtracker">https://github.com/ShiroOSL/nexa-linux/issues</url>
+
+  <developer id="io.github.shiroosl">
+    <name>ShiroOSL</name>
+  </developer>
+  <update_contact>noreply@github.com</update_contact>
+
+  <content_rating type="oars-1.1">
+    <content_attribute id="language-profanity">mild</content_attribute>
+  </content_rating>
+
+  <releases>
+    <release version="1.1.0" date="2026-09-01">
+      <description>
+        <p>Sandbox and licensing hardening, plus a wake-word reliability fix.</p>
+      </description>
+    </release>
+    <release version="1.0.0" date="2026-08-28">
+      <description>
+        <p>First public release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

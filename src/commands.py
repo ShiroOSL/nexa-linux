@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 ShiroOSL. All Rights Reserved.
-# This file is proprietary and NOT covered by the repo's GPL-3.0 license.
-# See LICENSE-PRIVATE.md.
 import datetime
 import urllib.request
 import urllib.parse
+import collections
 import json
 import webbrowser
 import subprocess
@@ -98,10 +96,21 @@ class CommandEngine:
         self.pending_power_action = None
 
         # --- CONVERSATION CONTEXT MEMORY ---
-        # Remembers the last meaningful intent + its params so short follow-up
-        # utterances ("what about Paris?", "do that again") can be resolved
-        # without repeating the full command.
-        self.last_context = {"intent": None, "params": {}}
+        # Remembers the last few meaningful intents + their params (a
+        # short rolling buffer, not a single slot) so follow-up utterances
+        # can refer back more than one turn -- "what about Paris?" (most
+        # recent), but also "play the song we talked about" after a
+        # different question came in between. In-memory only, never
+        # written to disk, and cleared on every restart -- deliberately
+        # local/ephemeral rather than a persisted log of what the user
+        # has asked, per Shiro's call on keeping this a privacy-conscious
+        # convenience feature rather than a stored history. Bounded via
+        # maxlen so it can never grow without limit; a deque automatically
+        # drops the oldest entry once full. Gated by
+        # self.app.conversation_memory_enabled (Settings > Privacy) -- off
+        # keeps this at effectively one slot, matching the old
+        # single-context behavior exactly.
+        self.context_history = collections.deque(maxlen=5)
         self.last_card_data = None  # optional rich-UI side channel; see handle_weather
         self.power_confirm_questions = {
             "shutdown": "Are you sure you want to shut down your system? Say yes to confirm, or no to cancel.",
@@ -110,14 +119,93 @@ class CommandEngine:
             "hibernate": "Are you sure you want to hibernate your system? Say yes to confirm, or no to cancel.",
         }
 
+    @property
+    def last_context(self):
+        """Backward-compatible view of the single most recent context, for
+        every existing call site that only ever needed "the last thing"
+        (the weather "what about X" follow-up, "open it" after a file
+        search, "do that again"). Those don't need to change to benefit
+        from the new multi-turn buffer -- only genuinely cross-turn
+        references (see _resolve_cross_turn_reference) need to look
+        further back."""
+        if not self.context_history:
+            return {"intent": None, "params": {}}
+        return self.context_history[-1]
+
     def _remember(self, intent, **params):
-        """Stores the last dispatched intent + its params for follow-up resolution."""
-        self.last_context = {"intent": intent, "params": params}
+        """Appends the dispatched intent + its params onto the rolling
+        buffer. When conversation memory is disabled in Settings, the
+        buffer is capped at 1 entry so behavior matches the old
+        single-slot design exactly -- no cross-turn references, only
+        "the last thing" follow-ups still work."""
+        if not getattr(self.app, "conversation_memory_enabled", True):
+            self.context_history.clear()
+        self.context_history.append({"intent": intent, "params": params})
+
+    def _resolve_cross_turn_reference(self, clean_text):
+        """Resolves references to something from earlier than just the
+        immediately-preceding turn -- "the song we talked about", "that
+        file", "play it again" (meaning the earlier song, not whatever
+        the last intent happened to be). Searches context_history from
+        most-recent to oldest for an entry matching the referenced
+        category, rather than only ever checking the newest slot the way
+        the older single-context follow-up logic does. Returns a reply
+        string if resolved, or None."""
+        if not getattr(self.app, "conversation_memory_enabled", True):
+            return None
+
+        text = clean_text.strip()
+
+        song_reference_phrases = [
+            "the song we talked about", "that song", "the song we were talking about",
+            "the song from earlier", "play that song again", "the track we talked about",
+        ]
+        if any(p in text for p in song_reference_phrases):
+            for entry in reversed(self.context_history):
+                if entry.get("intent") == "my_music":
+                    return self.handle_my_music()
+            return None
+
+        file_reference_phrases = [
+            "that file", "the file from earlier", "the file we talked about",
+            "open that file", "the file i searched for",
+        ]
+        if any(p in text for p in file_reference_phrases):
+            for entry in reversed(self.context_history):
+                if entry.get("intent") == "find_file":
+                    paths = entry.get("params", {}).get("results", [])
+                    if paths:
+                        # Route through the same path the newest-slot "open
+                        # it" flow uses, but scoped to this older entry's
+                        # results rather than whatever the current
+                        # last_context happens to hold.
+                        return self._open_host_file_path(paths[0])
+            return None
+
+        return None
+
+    def _open_host_file_path(self, path):
+        """Shared by handle_open_found_file (newest-slot "open it") and
+        _resolve_cross_turn_reference (older-slot "that file") -- both
+        just need to launch a specific already-known path via the host's
+        default handler."""
+        try:
+            subprocess.Popen(
+                ["flatpak-spawn", "--host", "xdg-open", path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            return f"Opening {os.path.basename(path)}."
+        except Exception:
+            return f"I found {os.path.basename(path)}, but couldn't open it."
 
     def _handle_followup(self, clean_text):
         """Checks if clean_text is a short follow-up referring to the last
         intent (e.g. 'what about Paris?', 'do that again'). Returns a reply
         string if resolved, or None to fall through to normal parsing."""
+        cross_turn = self._resolve_cross_turn_reference(clean_text)
+        if cross_turn is not None:
+            return cross_turn
+
         intent = self.last_context.get("intent")
         params = self.last_context.get("params", {})
         if not intent:
@@ -149,6 +237,35 @@ class CommandEngine:
                     rest = clean_text[len(prefix):].strip()
                     if rest:
                         return self.handle_weather(f"weather in {rest}")
+
+        # "open it" / "open the first one" / "open the second one" -- after
+        # a file search. Deliberately specific rather than a bare "open" in
+        # clean_text check: that broader check matched an unrelated "open
+        # chrome" (a real open-app command) whenever the last remembered
+        # intent happened to be find_file, silently opening a stale search
+        # result instead of launching the requested app. Requires "it"/
+        # "that"/"file"/an ordinal word/a digit as a whole word alongside
+        # "open" so a genuine reference to the search results is what's
+        # actually required to match -- word-boundary regex rather than a
+        # plain substring check, since substring matching on short words
+        # like "it" has its own false-positive risk ("open with something"
+        # contains "it" inside "with").
+        if intent == "find_file" and re.search(r'\bopen\b', clean_text):
+            ordinals = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth"]
+            has_ordinal = any(re.search(rf'\b{word}\b', clean_text) for word in ordinals)
+            has_digit = bool(re.search(r'\b(\d+)(st|nd|rd|th)?\b', clean_text))
+            has_reference_word = bool(re.search(r'\b(it|that|file|one)\b', clean_text))
+            if has_ordinal or has_digit or has_reference_word:
+                index = 0
+                for i, word in enumerate(ordinals):
+                    if re.search(rf'\b{word}\b', clean_text):
+                        index = i
+                        break
+                match = re.search(r'\b(\d+)(st|nd|rd|th)?\b', clean_text)
+                if match:
+                    index = int(match.group(1)) - 1
+                return self.handle_open_found_file(index)
+
         return None
 
     def handle_custom_command(self, clean_text):
@@ -215,7 +332,29 @@ class CommandEngine:
         random_greeting = random.choice(self.greetings_pool)
         return random_greeting.format(name=self.app.user_name)
 
-    def get_vocabulary_prompt(self):
+    # Category names must match COMMAND_CATEGORIES keys in main.py (the
+    # source of truth for labels/descriptions shown in Settings > Privacy >
+    # Command Access). Kept here as plain strings rather than importing the
+    # dict, since main.py already imports CommandEngine from this module --
+    # importing back would be circular.
+    def _permission_gate(self, category, friendly_name):
+        """Checked at the top of a command category's block in parse(),
+        right where its keywords are matched but before dispatching to the
+        real handler -- same placement pattern as handle_find_file's
+        per-folder allow-check. Returns a denial string if the category is
+        disabled in Settings > Privacy > Command Access, else None (meaning
+        proceed normally). self.app.disabled_categories is empty by default
+        (nothing locked down) so this is a no-op until the user opts in."""
+        disabled = getattr(self.app, "disabled_categories", set())
+        if category in disabled:
+            return (
+                f"I'm not allowed to touch {friendly_name} right now -- "
+                f"you can turn that back on in Settings > Privacy > Command Access."
+            )
+        return None
+
+    @staticmethod
+    def get_vocabulary_prompt():
         """A short natural-language prompt fed to Whisper as an initial_prompt,
         biasing speech recognition toward Nexa's name and her actual command
         vocabulary. The tiny model otherwise often mishears "Nexa" and less
@@ -224,7 +363,7 @@ class CommandEngine:
             "Hey Nexa. This is Nexa, a desktop voice assistant. "
             "Commands: play music, pause music, next song, previous song, what's playing, "
             "lock screen, shutdown, reboot, sleep, hibernate, "
-            "battery level, CPU usage, RAM usage, system info, "
+            "battery level, CPU usage, RAM usage, system info, run diagnostics, "
             "dark mode on, dark mode off, roll a dice, flip a coin, random number, magic eight ball, "
             "volume up, volume down, brightness up, brightness down, notifications, "
             "Bluetooth, Wi-Fi, airplane mode, night light, "
@@ -521,7 +660,7 @@ class CommandEngine:
         if any(phrase in clean_text for phrase in origin_keywords):
             if any(term in clean_text for term in ["human", "real", "ai", "what are you"]):
                 return "I am Nexa,  a desktop assistant engine, running natively right here on your machine!"
-            return f"My purpose is to accompany you, help you, and be your assistant."
+            return "My purpose is to accompany you, help you, and be your assistant."
 
         # 11. Joke Intent
         joke_keywords = [
@@ -563,6 +702,12 @@ class CommandEngine:
         media_prev_keywords = ["previous song", "previous track", "last song", "go back a song"]
         media_status_keywords = ["whats playing", "what's playing", "current song", "now playing", "what song is this", "what is playing"]
 
+        if any(p in clean_text for p in media_pause_keywords + media_toggle_keywords + media_play_keywords
+               + media_next_keywords + media_prev_keywords + media_status_keywords):
+            blocked = self._permission_gate("media", "media controls")
+            if blocked:
+                return blocked
+
         if any(p in clean_text for p in media_pause_keywords):
             return self.handle_media("pause")
         if any(p in clean_text for p in media_toggle_keywords):
@@ -579,9 +724,23 @@ class CommandEngine:
         # --- LOCK SCREEN ---
         lock_keywords = ["lock computer", "lock my computer", "lock the computer", "lock screen", "lock my screen", "lock the pc"]
         if any(p in clean_text for p in lock_keywords):
+            blocked = self._permission_gate("system_control", "system controls")
+            if blocked:
+                return blocked
             return self.handle_lock_screen()
 
         # --- POWER ACTIONS (require yes/no confirmation before executing) ---
+        power_keywords = [
+            "shutdown", "shut down", "power off", "turn off the computer", "turn off my computer",
+            "reboot", "restart the computer", "restart my computer", "restart pc",
+            "hibernate",
+        ]
+        if any(p in clean_text for p in power_keywords) or clean_text.strip() == "sleep" or any(
+            p in clean_text for p in ["go to sleep now", "put the computer to sleep", "suspend the computer", "suspend my computer"]
+        ):
+            blocked = self._permission_gate("system_control", "system controls")
+            if blocked:
+                return blocked
         if any(p in clean_text for p in ["shutdown", "shut down", "power off", "turn off the computer", "turn off my computer"]):
             return self._confirm_power("shutdown")
         if any(p in clean_text for p in ["reboot", "restart the computer", "restart my computer", "restart pc"]):
@@ -594,9 +753,17 @@ class CommandEngine:
         # --- BATTERY ---
         battery_keywords = ["battery level", "battery percentage", "how much battery", "check battery", "battery status"]
         if any(p in clean_text for p in battery_keywords):
+            blocked = self._permission_gate("system_info", "system info")
+            if blocked:
+                return blocked
             return self.handle_battery()
 
         # --- SYSTEM STATS ---
+        if "cpu usage" in clean_text or "cpu load" in clean_text or "ram usage" in clean_text or "memory usage" in clean_text \
+                or "system info" in clean_text or "system information" in clean_text or "specs" in clean_text:
+            blocked = self._permission_gate("system_info", "system info")
+            if blocked:
+                return blocked
         if "cpu usage" in clean_text or "cpu load" in clean_text:
             return self.handle_cpu_usage()
         if "ram usage" in clean_text or "memory usage" in clean_text:
@@ -604,8 +771,26 @@ class CommandEngine:
         if "system info" in clean_text or "system information" in clean_text or "specs" in clean_text:
             return self.handle_system_info()
 
+        # --- DIAGNOSTICS ---
+        diagnostics_keywords = [
+            "run diagnostics", "system diagnostics", "run a diagnostic", "diagnose my system",
+            "check my system", "system health", "is my system ok", "is my system okay",
+            "check for problems", "check for issues", "anything broken", "what's broken",
+            "whats broken", "check the logs", "check my logs", "failed services",
+        ]
+        if any(p in clean_text for p in diagnostics_keywords):
+            blocked = self._permission_gate("system_info", "system info")
+            if blocked:
+                return blocked
+            return self.handle_diagnostics()
+
+
         # --- DARK MODE ---
         if "dark mode" in clean_text:
+            if any(state in clean_text for state in ["on", "enable", "activate", "off", "disable", "deactivate"]):
+                blocked = self._permission_gate("system_control", "system controls")
+                if blocked:
+                    return blocked
             if any(state in clean_text for state in ["on", "enable", "activate"]):
                 return self.handle_dark_mode(True)
             if any(state in clean_text for state in ["off", "disable", "deactivate"]):
@@ -626,6 +811,17 @@ class CommandEngine:
         # --------------------------------------------------------
 
         # --- SEPARATED VOLUME COMMAND ENGINES ---
+        if ("volume" in clean_text and (
+            "up" in clean_text or "down" in clean_text or "increase" in clean_text or "decrease" in clean_text
+            or any(char.isdigit() for char in clean_text)
+        )) or ("brightness" in clean_text and (
+            "up" in clean_text or "down" in clean_text or "increase" in clean_text or "decrease" in clean_text
+            or any(char.isdigit() for char in clean_text)
+        )):
+            blocked = self._permission_gate("system_control", "system controls")
+            if blocked:
+                return blocked
+
         if "volume up" in clean_text or "increase volume" in clean_text:
             return self.handle_volume(up=True)
 
@@ -655,6 +851,9 @@ class CommandEngine:
 
         # Custom "my music" Intent
         if "my music" in clean_text:
+            blocked = self._permission_gate("media", "media controls")
+            if blocked:
+                return blocked
             return self.handle_my_music()
 
         # Custom "my" and "name" Identity Intent
@@ -663,9 +862,21 @@ class CommandEngine:
 
         # Notification Intent
         if "notification" in clean_text or "notifications" in clean_text:
+            blocked = self._permission_gate("notifications", "notifications")
+            if blocked:
+                return blocked
             return self.handle_notifications()
 
         # Clipboard / Notes Intent
+        clipboard_notes_triggers = [
+            "remember this", "save this", "remember that", "save my clipboard",
+            "clipboard", "clear my notes", "forget everything i saved", "delete my notes",
+            "my notes", "what did i save", "read my notes", "read my saved",
+        ]
+        if any(kw in clean_text for kw in clipboard_notes_triggers):
+            blocked = self._permission_gate("clipboard_notes", "clipboard and notes")
+            if blocked:
+                return blocked
         if any(kw in clean_text for kw in ["remember this", "save this", "remember that", "save my clipboard"]):
             return self.handle_save_clipboard_note()
         if "clipboard" in clean_text:
@@ -679,12 +890,29 @@ class CommandEngine:
         toggle_keywords = ["bluetooth", "wifi", "wi-fi", "airplane", "night light", "nightlight"]
         if any(kw in clean_text for kw in toggle_keywords):
             if any(state in clean_text for state in ["on", "off", "enable", "disable"]):
+                blocked = self._permission_gate("system_control", "system controls")
+                if blocked:
+                    return blocked
                 return self.handle_toggles(clean_text)
 
         # Open App Intent
         if clean_text.startswith("open "):
+            blocked = self._permission_gate("open_apps", "opening apps")
+            if blocked:
+                return blocked
             return self.handle_open_app(clean_text)
-        
+
+        # File Search Intent (must run before Web Search Intent -- both share the word "search")
+        file_search_phrases = [
+            "find the file", "find a file", "find file",
+            "search for the file", "search for a file", "search for file",
+            "locate the file", "locate a file", "locate file",
+            "where is the file", "where is my file",
+            "look for the file", "look for a file", "look for file",
+        ]
+        if any(phrase in clean_text for phrase in file_search_phrases):
+            return self.handle_find_file(clean_text)
+
         # Weather Intent
         weather_words = ["weather", "temperature", "rain", "forecast", "meteo"]
         if any(word in clean_text for word in weather_words):
@@ -708,7 +936,22 @@ class CommandEngine:
         # Basic Greetings
         if any(word in clean_text for word in ["hello", "hi", "hey"]):
             return self.get_initial_greeting()
-            
+
+        # Live Web Search fallback -- Siri/Google Assistant style: anything
+        # that reaches here didn't match a known command or greeting, so if
+        # it looks like an actual question, try answering it via live web
+        # search instead of a random filler reply. Deliberately last: every
+        # specific intent above (weather, time, "search google", etc.) is a
+        # more precise, faster, fully-offline match and should always win.
+        # Gated by its own dedicated Settings > Privacy > Web Search toggle
+        # (self.app.web_search_enabled) rather than the Command Access
+        # category list -- it needs an API key alongside the switch, which
+        # doesn't fit that group's simple on/off rows.
+        if self._looks_like_a_question(clean_text) and getattr(self.app, "web_search_enabled", False):
+            web_answer = self.handle_web_search(text)
+            if web_answer is not None:
+                return web_answer
+
         return random.choice(self.fallback_pool)
 
     def handle_set_volume(self, level):
@@ -971,6 +1214,68 @@ class CommandEngine:
         except Exception:
             return "I connected to SwayNotificationCenter, but couldn't read its notification history."
 
+    def _extract_music_metadata(self, path):
+        """Reads title/artist/album tags and embedded cover art (if any) from
+        an audio file via mutagen, across the common tag formats (ID3/MP3,
+        FLAC, MP4/M4A, OGG Vorbis). Cover art bytes are written to a small
+        on-disk cache (keyed by content hash, so repeat plays of the same
+        track don't re-extract) since only a path is passed through
+        last_card_data -- image decoding/rendering stays in main.py."""
+        result = {"title": None, "artist": None, "album": None, "art_path": None}
+        try:
+            import mutagen
+        except Exception:
+            return result
+
+        try:
+            easy = mutagen.File(path, easy=True)
+            if easy and easy.tags:
+                title = easy.tags.get("title")
+                artist = easy.tags.get("artist")
+                album = easy.tags.get("album")
+                result["title"] = title[0] if title else None
+                result["artist"] = artist[0] if artist else None
+                result["album"] = album[0] if album else None
+        except Exception:
+            pass
+
+        art_bytes = None
+        try:
+            audio = mutagen.File(path)
+            if audio is not None:
+                # ID3 (MP3, sometimes WAV)
+                if hasattr(audio, "tags") and audio.tags:
+                    for key in audio.tags.keys():
+                        if str(key).startswith("APIC"):
+                            art_bytes = audio.tags[key].data
+                            break
+                # FLAC
+                if art_bytes is None and hasattr(audio, "pictures") and audio.pictures:
+                    art_bytes = audio.pictures[0].data
+                # MP4 / M4A
+                if art_bytes is None and hasattr(audio, "tags") and audio.tags and "covr" in audio.tags:
+                    covers = audio.tags["covr"]
+                    if covers:
+                        art_bytes = bytes(covers[0])
+        except Exception:
+            pass
+
+        if art_bytes:
+            try:
+                import hashlib
+                cache_dir = os.path.expanduser("~/.local/share/nexa/album-art-cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                digest = hashlib.sha256(art_bytes).hexdigest()[:32]
+                art_path = os.path.join(cache_dir, f"{digest}.img")
+                if not os.path.exists(art_path):
+                    with open(art_path, "wb") as f:
+                        f.write(art_bytes)
+                result["art_path"] = art_path
+            except Exception:
+                pass
+
+        return result
+
     def handle_my_music(self):
         """Plays the user's selected track with their default media player via XDG OpenURI Portal."""
         if not hasattr(self.app, 'fav_music') or not self.app.fav_music:
@@ -980,6 +1285,16 @@ class CommandEngine:
             return "I tracked your music path, but the file doesn't seem to exist there anymore."
 
         file_name = os.path.basename(self.app.fav_music)
+        meta = self._extract_music_metadata(self.app.fav_music)
+        display_title = meta["title"] or os.path.splitext(file_name)[0]
+        self.last_card_data = {
+            "type": "music",
+            "title": display_title,
+            "artist": meta["artist"],
+            "album": meta["album"],
+            "art_path": meta["art_path"],
+        }
+        self._remember("my_music")
 
         try:
             import gi
@@ -1128,7 +1443,7 @@ class CommandEngine:
     def _find_bluetooth_adapter(self, bus):
         import gi
         gi.require_version('Gio', '2.0')
-        from gi.repository import Gio, GLib
+        from gi.repository import Gio
         proxy = self._session_bus_proxy(bus, 'org.bluez', '/', 'org.freedesktop.DBus.ObjectManager')
         objects = proxy.call_sync('GetManagedObjects', None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
         for path, ifaces in objects.items():
@@ -1197,7 +1512,7 @@ class CommandEngine:
         try:
             import gi
             gi.require_version('Gio', '2.0')
-            from gi.repository import Gio, GLib
+            from gi.repository import Gio
 
             bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
@@ -1319,7 +1634,7 @@ class CommandEngine:
         try:
             import gi
             gi.require_version('Gio', '2.0')
-            from gi.repository import Gio, GLib
+            from gi.repository import Gio
 
             bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
             upower_proxy = self._session_bus_proxy(bus, 'org.freedesktop.UPower', '/org/freedesktop/UPower', 'org.freedesktop.UPower')
@@ -1411,6 +1726,100 @@ class CommandEngine:
             return "Here's your system info — " + ", ".join(parts) + "."
         except Exception:
             return "I couldn't gather system info right now."
+
+    # --- Diagnostics --------------------------------------------------------------------
+    def _diag_recent_errors(self):
+        """Recent priority<=3 (error/crit/alert/emerg) journal entries since
+        boot, via journalctl on the host. -o cat strips timestamp/hostname
+        for a cleaner one-line-per-entry display; the "^\u2591" filter drops
+        journalctl's own decorative separator lines (the boxed explanation
+        it inserts under certain failures), which aren't an error message
+        themselves."""
+        output = self._run_host_cmd_output(
+            ["bash", "-c", "journalctl -p 3 -b --no-pager -o cat 2>/dev/null | grep -v '^░' | tail -6"],
+            timeout=8,
+        )
+        if not output:
+            return []
+        return [line for line in output.split("\n") if line.strip()]
+
+    def _diag_failed_units(self):
+        """Failed systemd units (system scope) -- a clean, structured signal
+        distinct from raw journal noise. User-scope --failed isn't checked
+        since the host's user session bus generally isn't reachable this
+        way (confirmed: returns "Connection refused" over flatpak-spawn)."""
+        output = self._run_host_cmd_output(
+            ["systemctl", "--failed", "--no-legend", "--no-pager"], timeout=8
+        )
+        if not output:
+            return []
+        units = []
+        for line in output.split("\n"):
+            line = line.strip()
+            if line:
+                units.append(line.split()[0])
+        return units
+
+    def _diag_disk_space(self):
+        """Free space on the host's root and home filesystems, via df on
+        the host (the sandbox's own / is not the host's real disk, so this
+        has to run host-side like everything else in this class). Flags
+        anything at or above 90% used."""
+        output = self._run_host_cmd_output(
+            ["bash", "-c", "df -h / \"$HOME\" 2>/dev/null | tail -n +2"], timeout=8
+        )
+        if not output:
+            return []
+        warnings = []
+        seen_mounts = set()
+        for line in output.split("\n"):
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            mount = parts[5]
+            if mount in seen_mounts:
+                continue
+            seen_mounts.add(mount)
+            try:
+                percent = int(parts[4].rstrip("%"))
+            except ValueError:
+                continue
+            if percent >= 90:
+                warnings.append(f"{mount} is {percent}% full ({parts[3]} free)")
+        return warnings
+
+    def handle_diagnostics(self):
+        """Runs a quick health check of the host system -- recent errors,
+        failed services, and low disk space -- and shows a results card
+        instead of a wall of text. Deliberately scoped to these three:
+        they're universal across any systemd-based Linux distro (unlike
+        e.g. pending package updates, which is noisy and package-manager
+        specific), and each one is a genuine "something's wrong" signal
+        rather than routine noise."""
+        errors = self._diag_recent_errors()
+        failed_units = self._diag_failed_units()
+        disk_warnings = self._diag_disk_space()
+
+        total_issues = len(errors) + len(failed_units) + len(disk_warnings)
+
+        self.last_card_data = {
+            "type": "diagnostics",
+            "errors": errors,
+            "failed_units": failed_units,
+            "disk_warnings": disk_warnings,
+        }
+
+        if total_issues == 0:
+            return "Everything looks healthy -- no failed services, no low disk space, and no recent critical errors."
+
+        parts = []
+        if failed_units:
+            parts.append(f"{len(failed_units)} failed service{'s' if len(failed_units) != 1 else ''}")
+        if disk_warnings:
+            parts.append(f"{len(disk_warnings)} disk space warning{'s' if len(disk_warnings) != 1 else ''}")
+        if errors:
+            parts.append(f"{len(errors)} recent error{'s' if len(errors) != 1 else ''}")
+        return "I found " + ", ".join(parts) + ". Here's a summary:"
 
     # --- Dark mode --------------------------------------------------------------------
     def handle_dark_mode(self, state):
@@ -1581,6 +1990,113 @@ class CommandEngine:
             return "cloudy"
         return "sunny"
 
+    def handle_find_file(self, text):
+        """Searches the host filesystem for files matching a name/keyword,
+        via flatpak-spawn --host (bypasses the sandbox's narrow --filesystem
+        grants the same way handle_open_app/get_host_desktop_files do --
+        the actual `find` process runs outside the sandbox entirely).
+        Only searches folders the user has enabled in Settings > Privacy >
+        File Search (self.app.search_folders); if a specific folder is named
+        in the request but isn't enabled, asks the user to enable it instead
+        of silently searching it anyway."""
+        # Kept in sync with FILE_SEARCH_FOLDERS in main.py (codes must match
+        # what's stored in the search_folders config value).
+        folder_paths = {
+            "home": "$HOME",
+            "downloads": "$HOME/Downloads",
+            "documents": "$HOME/Documents",
+            "desktop": "$HOME/Desktop",
+            "pictures": "$HOME/Pictures",
+            "music": "$HOME/Music",
+            "videos": "$HOME/Videos",
+        }
+        allowed = getattr(self.app, "search_folders", set())
+
+        clean = text.lower()
+        for phrase in [
+            "find the file", "find a file", "find file",
+            "search for the file", "search for a file", "search for file",
+            "locate the file", "locate a file", "locate file",
+            "where is the file", "where is my file",
+            "look for the file", "look for a file", "look for file",
+        ]:
+            clean = clean.replace(phrase, "")
+        clean = clean.strip()
+
+        requested_code = None
+        for code in folder_paths:
+            for marker in (f"in my {code}", f"in {code}"):
+                if marker in clean:
+                    requested_code = code
+                    clean = clean.replace(marker, "").strip()
+                    break
+            if requested_code:
+                break
+
+        for lead in ["called ", "named "]:
+            if clean.startswith(lead):
+                clean = clean[len(lead):].strip()
+
+        query = clean.strip(" ?.!")
+        if not query:
+            return "What's the file called?"
+
+        if requested_code is not None:
+            if requested_code not in allowed:
+                folder_label = requested_code.replace("_", " ").title()
+                return (
+                    f"I'm not allowed to search your {folder_label} folder yet -- "
+                    f"you can enable it in Settings > Privacy > File Search."
+                )
+            search_roots = [folder_paths[requested_code]]
+        else:
+            if not allowed:
+                return "I don't have permission to search any folders yet -- enable some in Settings > Privacy > File Search."
+            search_roots = [folder_paths[code] for code in allowed]
+
+        escaped = query.replace("'", "'\\''")
+        roots_arg = " ".join(search_roots)
+        shell_cmd = (
+            f"find {roots_arg} -maxdepth 6 -iname '*{escaped}*' "
+            f"-not -path '*/.*' 2>/dev/null | sort -u | head -8"
+        )
+        output = self._run_host_cmd_output(["bash", "-c", shell_cmd], timeout=8)
+
+        if not output:
+            return f"I couldn't find any file matching \"{query}\"."
+
+        paths = [p for p in output.split("\n") if p.strip()]
+        self._remember("find_file", results=paths)
+
+        self.last_card_data = {
+            "type": "files",
+            "query": query,
+            "files": [{"name": os.path.basename(p), "path": p} for p in paths],
+        }
+
+        if len(paths) == 1:
+            name = os.path.basename(paths[0])
+            return f"I found one match: {name}. Say \"open it\" if you'd like me to open it."
+
+        names = [os.path.basename(p) for p in paths[:5]]
+        listed = ", ".join(names)
+        extra = f", and {len(paths) - 5} more" if len(paths) > 5 else ""
+        return (
+            f"I found {len(paths)} matches, including {listed}{extra}. "
+            f"Say \"open the first one\" (or second, third...) if you'd like me to open it."
+        )
+
+    def handle_open_found_file(self, index=0):
+        """Opens a file from the results of the last handle_find_file call,
+        via the host's default handler (xdg-open), same host-bypass
+        mechanism as handle_open_app."""
+        paths = self.last_context.get("params", {}).get("results", [])
+        if not paths:
+            return "I don't have any search results to open -- try searching for a file first."
+        if index < 0 or index >= len(paths):
+            return f"I only found {len(paths)} matching file(s) -- I couldn't open number {index + 1}."
+        return self._open_host_file_path(paths[index])
+
     def handle_search(self, text):
         query = text.lower()
         for phrase in ["search for", "search", "google"]:
@@ -1598,3 +2114,165 @@ class CommandEngine:
             return "I've opened a new tab in your browser."
         except Exception:
             return "I tried to open your browser, but something went wrong."
+
+    _QUESTION_STARTERS = (
+        "what", "what's", "whats", "who", "who's", "whos", "when", "when's",
+        "where", "where's", "why", "how", "how's", "hows", "is ", "are ",
+        "does ", "do ", "did ", "can ", "will ", "should ", "which ",
+    )
+
+    # Bare noun-phrase lookups ("capital of France", "population of Japan",
+    # "iphone 17 price") are extremely common real search phrasing with no
+    # question word or "?" at all -- the exact shape that _QUESTION_STARTERS
+    # alone was missing (confirmed: "capital of France" got the generic
+    # fallback reply, while "capital of France?" worked, purely because of
+    # the trailing "?"). Matched as "<word(s)> of <word(s)>" or a phrase
+    # ending in a common lookup noun, rather than trying to require a
+    # question word for phrasing that was never a question to begin with.
+    _LOOKUP_PHRASE_RE = re.compile(
+        r"^\S+(\s+\S+)*\s+of\s+\S+(\s+\S+)*$"
+        r"|(price|cost|capital|population|definition|meaning|weather|"
+        r"height|age|net worth|release date)\s*$"
+    )
+
+    def _looks_like_a_question(self, clean_text):
+        """Heuristic gate for the live web search fallback: does this
+        message look like an actual question or lookup worth trying to
+        answer, rather than random unrecognized chatter? Accepts a
+        question mark, a leading question word/phrase, or a bare
+        noun-phrase lookup shape (_LOOKUP_PHRASE_RE) -- plus a minimum
+        word count, to avoid firing a network request for very short
+        utterances (mis-transcribed noise, a stray word) that are
+        unlikely to be a real lookup."""
+        text = clean_text.strip()
+        if not text or len(text.split()) < 3:
+            return False
+        if text.endswith("?"):
+            return True
+        if text.startswith(self._QUESTION_STARTERS):
+            return True
+        return bool(self._LOOKUP_PHRASE_RE.search(text))
+
+
+    # Wikipedia-style citation markers render as a Markdown link whose link
+    # text is itself "[1]" -- e.g. "[[1]](https://.../cite_note-Foo-1)" --
+    # so this has to match the whole link (brackets, inner [N], and URL
+    # together), not just an isolated "[[1]]" with no following "(url)"
+    # (that pattern never actually occurs).
+    _MD_CITATION_RE = re.compile(r"\[\[\d+\]\]\([^)]+\)")
+
+    # Product/e-commerce pages (unlike Wikipedia) often scrape through as
+    # run-together DOM text rather than clean Markdown -- UI labels like
+    # "Footnote" or "#Lease" stitched directly onto the price text with no
+    # separating space at all, plus stray escaped-punctuation backslashes.
+    # These aren't Markdown syntax at all, just scraping noise, so they get
+    # cleaned up regardless of whether the surrounding Markdown is kept or
+    # stripped. Matches "Footnote" directly (optionally glued onto the
+    # previous word with no space, e.g. "monthsFootnote") rather than a
+    # generic lowercase-to-uppercase glue check, which would just as
+    # happily "fix" a legitimate word like "iPhone" into "i Phone" -- there's
+    # no way to tell a genuine internal capital apart from a glued word
+    # boundary without anchoring on the specific junk label itself.
+    _SCRAPED_UI_LABEL_RE = re.compile(r"\s*Footnote\s*#?\d*")
+    _STRAY_BACKSLASH_RE = re.compile(r"\\(?=[\s$]|$)")
+
+    def _clean_scraped_junk(self, text):
+        """Removes Wikipedia-style citation links and e-commerce-page
+        scraping artifacts (glued-on "Footnote" UI labels, stray escaped
+        backslashes) from a Firecrawl result -- distinct from Markdown
+        syntax, so this runs whether or not the caller wants Markdown kept
+        (main.py's chat bubble now renders it) or stripped (handle_search's
+        plain-text uses, if any). e.g. Apple's own product page came
+        through as "24 mo.monthsFootnote Footnote #Lease" and "Get\\$40"
+        with no actual spacing between page elements -- this is cleanup
+        of that noise, not of legitimate Markdown formatting."""
+        text = self._MD_CITATION_RE.sub("", text)
+        text = self._SCRAPED_UI_LABEL_RE.sub(" ", text)
+        text = self._STRAY_BACKSLASH_RE.sub("", text)
+        text = re.sub(r"\n{2,}", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+    _MD_HEADER_RE = re.compile(r"^#{1,6}\s*", re.MULTILINE)
+    _MD_BOLD_ITALIC_RE = re.compile(r"(\*\*\*|\*\*|\*|___|__|_)")
+
+    def _strip_markdown_to_plain(self, text):
+        """Full Markdown-to-plain-text stripping (unlike
+        _clean_scraped_junk, which deliberately leaves Markdown syntax
+        intact for main.py's Pango-rendering chat bubble). Used for the
+        Sources card's title/description labels, which are still plain
+        Gtk.Label widgets with no markup rendering -- those need actual
+        plain text, or "**bold**" would show as literal asterisks there."""
+        text = self._clean_scraped_junk(text)
+        text = self._MD_LINK_RE.sub(r"\1", text)
+        text = self._MD_HEADER_RE.sub("", text)
+        text = self._MD_BOLD_ITALIC_RE.sub("", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+
+    def handle_web_search(self, text):
+        """Answers a general question via live web search (Firecrawl's
+        /v2/search API), old-Siri style: rather than trying to summarize
+        or clean a scraped page snippet into a readable sentence (raw
+        product/retail pages in particular came through riddled with
+        artifacts -- stray pilcrows, "##"/"**" fragments, HTML "<br>" tags,
+        garbled non-Latin bytes -- that kept surfacing new junk patterns
+        faster than they could be individually patched), Nexa just says a
+        short fixed line ("Here's what I found on the web") and hands the
+        person straight to the real source via the Sources card, the same
+        way Siri used to before on-device summarization existed. This
+        sidesteps the whole cleanup problem instead of fighting it --
+        proper summarization of arbitrary scraped content is a genuinely
+        harder problem (real HTML extraction or an LLM pass), earmarked
+        for a future "AI mode" rather than this simple keyword-matched
+        assistant. Requires the user's own Firecrawl API key (Settings >
+        Privacy > Web Search, free tier: 1,000 searches/month, no card
+        required). Nexa is local-first by design and this is the one
+        feature that reaches the internet, so it's opt-in and keyed to
+        the user's own account rather than a shared/bundled key. Returns
+        None (not a string) on any failure so the caller falls through to
+        the normal fallback pool instead of showing a raw error for what
+        might just be unrecognized chatter that happened to look like a
+        question."""
+        api_key = getattr(self.app, "firecrawl_api_key", "")
+        if not api_key:
+            return (
+                "I can look that up for you once you add a free Firecrawl API key "
+                "in Settings > Privacy > Web Search."
+            )
+
+        query = text.strip()
+        try:
+            url = "https://api.firecrawl.dev/v2/search"
+            payload = json.dumps({"query": query, "limit": 5}).encode()
+            req = urllib.request.Request(url, data=payload, method="POST", headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            })
+            with urllib.request.urlopen(req, timeout=8) as response:
+                data = json.loads(response.read().decode())
+        except Exception:
+            return None
+
+        results = (data.get("data") or {}).get("web") or []
+        if not results:
+            return None
+
+        self.last_card_data = {
+            "type": "web_search",
+            "query": query,
+            "results": [
+                {
+                    # Titles are short and generally clean even on messy
+                    # pages, so a light plain-text pass is still worth it
+                    # here -- unlike full descriptions, this isn't trying
+                    # to summarize scraped body content.
+                    "title": self._strip_markdown_to_plain(r.get("title", "")),
+                    "url": r.get("url", ""),
+                }
+                for r in results[:5]
+            ],
+        }
+
+        return f"Here's what I found on the web for \u201c{query}\u201d:"
