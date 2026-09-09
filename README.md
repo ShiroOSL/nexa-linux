@@ -8,6 +8,12 @@
   A local-first, privacy-focused voice assistant for Linux — built with GTK4 &amp; Adwaita.
 </p>
 
+<p align="center">
+  <a href="https://ko-fi.com/shiro_osl">
+    <img src="kofi-button.png" height="36" alt="Support me on Ko-fi">
+  </a>
+</p>
+
 ---
 
 ## The story
@@ -79,11 +85,14 @@ are all welcome.
 The application code in this repository is licensed under
 [GPL-3.0](LICENSE).
 
-A small set of files — Nexa's custom wake-word model and the command
-logic in `src/commands.py`, `src/nexa_studio_commands.py`, and
-`src/training_data.py` — are **not** covered by the GPL-3.0 license.
-See [LICENSE-PRIVATE.md](LICENSE-PRIVATE.md) for their terms.
+The "Nexa" name and logo are protected as trademarks — see
+[TRADEMARKS.md](TRADEMARKS.md).
 
 Nexa also bundles or downloads several third-party models and
 components (Whisper, Piper voices, openWakeWord) under their own
 original licenses — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+## Support
+
+If Nexa's been useful to you, consider supporting development on
+[Ko-fi](https://ko-fi.com/shiro_osl) — it genuinely helps keep this going.
