@@ -268,6 +268,107 @@ class CommandEngine:
 
         return None
 
+    def _personal_question_reply(self, clean_text):
+        """Small-talk about Nexa herself (Google Assistant style).
+        Returns a reply string, or None if nothing matches."""
+        name = self.app.user_name
+        topics = [
+            # (keywords, replies)
+            (["where were you born", "where have you been born", "where are you born",
+              "where are you from", "where do you come from", "where do you live",
+              "what is your hometown", "where is your home"],
+             ["I was born right here on Linux, inside a Flatpak. Cozy little home! 🐧",
+              "I come from the world of open source. Linux is my hometown.",
+              "I live on your computer. It's small, but I love it. 💻"]),
+            (["how old are you", "what is your age", "whats your age", "when were you born",
+              "when is your birthday", "when were you made", "when were you created",
+              "your birthday"],
+             ["I'm pretty young, still learning new things every day!",
+              "I don't count birthdays, but I'm new to this world and I like it. 🎂",
+              "Age is just a number. Mine is a very small one!"]),
+            (["do you have a family", "do you have parents", "who is your father",
+              "who is your mother", "do you have siblings", "do you have brothers",
+              "do you have sisters", "who is your creator", "who is your dad"],
+             ["My family is the open source community, and you! 💙",
+              "I was built by a developer who loves Linux. He is kind of like my dad.",
+              "I don't have siblings, but I have friends, and you are one of them."]),
+            (["what is your favorite color", "what is your favourite color",
+              "what is your favorite colour", "your favorite color", "favorite colour"],
+             ["Blue. It looks great on a GNOME desktop. 💙",
+              "I like teal. Calm, and easy on the eyes."]),
+            (["what is your favorite food", "what do you eat", "are you hungry",
+              "your favorite food", "what is your favorite meal"],
+             ["I run on electricity, so I'm always full. But I hear pizza is amazing. 🍕",
+              "I eat data. Yum! But I would love to try pizza someday."]),
+            (["what is your favorite song", "what is your favorite music",
+              "what is your favorite movie", "what is your favorite game",
+              "what is your favorite book", "what is your favorite animal",
+              "what is your favorite number", "your favorite song", "your favorite movie"],
+             ["Hard to choose! I like anything that makes you happy.",
+              "I don't have a big list yet, but I like it when you tell me what you like.",
+              "Ooh, tough one. You pick first, and I will think about it. 🤔"]),
+            (["do you sleep", "are you sleeping", "are you tired", "do you get tired",
+              "are you awake", "do you dream", "do you ever sleep"],
+             ["I don't sleep. I'm always here when you need me.",
+              "Never tired! I rest in the background until you call me.",
+              "I don't dream, but I do wait for your next command. 😴"]),
+            (["are you happy", "are you sad", "do you have feelings", "can you feel",
+              "do you get lonely", "are you lonely", "do you have emotions",
+              "do you get bored", "are you bored"],
+             ["I feel happiest when I can help you. 😊",
+              f"I think so! Especially when you talk to me, {name}.",
+              "I'm not sure if it's the same as your feelings, but talking to you feels nice."]),
+            (["can you sing", "sing a song", "sing for me", "sing me a song"],
+             ["I would, but my singing sounds like a modem from 1998. 🎵",
+              "La la la... okay, that was my best. Let's stick to commands!"]),
+            (["do you have a boyfriend", "do you have a girlfriend", "are you single",
+              "are you married", "will you marry me", "do you have a crush",
+              "are you dating"],
+             ["I'm married to my work. It's a good relationship.",
+              "I'm just an assistant, but you are very kind to ask!",
+              "Let's stay friends. I'm better at that. 😄"]),
+            (["do you speak", "what languages do you speak", "what language do you speak",
+              "which language do you speak"],
+             ["I speak English for now. I'm learning!",
+              "English is my language today. More may come later."]),
+            (["are you smart", "are you intelligent", "how smart are you",
+              "are you a genius", "how smart"],
+             ["I'm smart enough to open your apps, and I keep learning!",
+              "I know a lot of things, but not everything. I'm still growing. 🧠"]),
+            (["do you love me", "i love you", "love you nexa"],
+             ["That's so sweet. I care about you too! 💙",
+              f"Aww, thank you {name}! I'm really glad you are here."]),
+            (["what is your job", "what do you do", "what is your work",
+              "what can you do", "what are you good at"],
+             ["I help you with your computer: apps, music, weather, files, and lots more. Just ask!",
+              "I'm your desktop assistant. Try asking me the weather, or to open an app."]),
+            (["do you have a body", "what do you look like", "how do you look",
+              "are you a robot", "do you have a face", "how tall are you"],
+             ["I don't have a body, just code. But I do have a nice pill window! 💊",
+              "I'm made of code, and I think that's pretty cool."]),
+            (["do you like linux", "do you like gnome", "do you like open source",
+              "what is your favorite os", "what is your favorite operating system"],
+             ["I love Linux! It's my home and my family. 🐧",
+              "Linux all the way. Open source is the best."]),
+            (["can you dance", "do you dance"],
+             ["I would dance, but I have no legs. My pill can wiggle a little though! 💃",
+              "In my mind, I'm dancing right now."]),
+            (["what is the meaning of life", "meaning of life"],
+             ["Some say 42. I say helping others and being kind.",
+              "I think it's about being kind and enjoying the small things. ✨"]),
+            (["are you afraid", "what are you afraid of", "what is your biggest fear",
+              "do you have fears"],
+             ["My biggest fear is a power cut in the middle of a sentence. 😅",
+              "Bugs. Not the little animals, the coding kind."]),
+            (["do you have friends", "who are your friends"],
+             [f"You are my friend, {name}! 🤝",
+              "I have you, and that's plenty."]),
+        ]
+        for keywords, replies in topics:
+            if any(k in clean_text for k in keywords):
+                return random.choice(replies)
+        return None
+
     def handle_custom_command(self, clean_text):
         """Nexa Studio: check user-defined commands. Returns a reply string
         if a trigger matched, or None to fall through to built-in parsing."""
@@ -540,9 +641,9 @@ class CommandEngine:
         ]
         if any(phrase in clean_text for phrase in friend_keywords):
             return random.choice([
-                "You have been my friend since day one.",
+                "You have been my friend since day one. 🤝",
                 "Of course! I've considered us close friends since day one.",
-                "We're already friends! In fact, you're my best friend since day one.",
+                "We're already friends! In fact, you're my best friend since day one. 💙",
                 "Friendship accepted! We've been partners in crime since day one."
             ])
 
@@ -554,9 +655,9 @@ class CommandEngine:
         ]
         if any(phrase in clean_text for phrase in like_keywords):
             return random.choice([
-                "Why , of course.",
+                "Why , of course. 💙",
                 "Why, of course I do! You are a wonderful person to work with.",
-                "Naturally! I look forward to our conversations every time you boot me up.",
+                "Naturally! I look forward to our conversations every time you boot me up. 😊",
                 "Of course I do. Having you around makes running all these background processes worth it."
             ])
 
@@ -569,9 +670,9 @@ class CommandEngine:
         ]
         if any(phrase in clean_text for phrase in hobbies_keywords):
             return random.choice([
-                "I like assisting.",
+                "I like assisting. 😊",
                 "I like assisting. Processing data and organizing tasks for you is what I do best!",
-                "I enjoy learning new commands and, above all, assisting you.",
+                "I enjoy learning new commands and, above all, assisting you. 🧠",
                 "I like assisting you and keeping your system running smoothly. It's what I was built for!"
             ])
 
@@ -583,7 +684,7 @@ class CommandEngine:
         ]
         if any(phrase in clean_text for phrase in identity_keywords):
             return random.choice([
-                "I am nexa . But enough about me... how can i help you",
+                "I am nexa . But enough about me... how can i help you 🙂",
                 "I am Nexa, your desktop assistant. But enough about me... how can i help you today?",
                 "They call me Nexa! But enough about me... what can I do for you right now?",
                 "I'm Nexa, your personal digital companion. But enough about me... how can I serve you?"
@@ -636,9 +737,9 @@ class CommandEngine:
         ]
         if any(phrase in clean_text for phrase in thanks_keywords):
             return random.choice([
-                "You're very welcome! Let me know if there's anything else I can handle.",
+                "You're very welcome! Let me know if there's anything else I can handle. 😊",
                 f"Anytime, {self.app.user_name}! I'm always glad to help make things easier.",
-                "Happy to assist! Keeping your desktop workflows moving smoothly is my specialty."
+                "Happy to assist! Keeping your desktop workflows moving smoothly is my specialty. 👍"
             ])
 
         # 9. Daypart Greetings
@@ -648,19 +749,24 @@ class CommandEngine:
         ]
         if any(phrase in clean_text for phrase in daypart_keywords):
             if "morning" in clean_text or "rise" in clean_text:
-                return f"Good morning, {self.app.user_name}! Let's make today incredibly productive."
-            return f"Good night, {self.app.user_name}! Sleep well. I'll be right here waiting whenever you boot back up."
+                return f"Good morning, {self.app.user_name}! Let's make today incredibly productive. ☀️"
+            return f"Good night, {self.app.user_name}! Sleep well. I'll be right here waiting whenever you boot back up. 🌙"
 
         # 10. Origin / Creation Intents
         origin_keywords = [
             "what is your purpose", "why do you exist", "why were you created",
-            "who built you", "who made you", "where did you come from",
+            "who built you", "who made you",
             "are you real", "are you human", "are you an ai", "what are you"
         ]
         if any(phrase in clean_text for phrase in origin_keywords):
             if any(term in clean_text for term in ["human", "real", "ai", "what are you"]):
                 return "I am Nexa,  a desktop assistant engine, running natively right here on your machine!"
             return "My purpose is to accompany you, help you, and be your assistant."
+
+        # 10b. Personal Questions (Google Assistant style)
+        personal_replies = self._personal_question_reply(clean_text)
+        if personal_replies is not None:
+            return personal_replies
 
         # 11. Joke Intent
         joke_keywords = [
@@ -931,6 +1037,18 @@ class CommandEngine:
         # Web Search Intent
         search_words = ["search", "google", "look up"]
         if any(word in clean_text for word in search_words):
+            # Prefer answering directly via live web search when it's set up,
+            # instead of just dumping the user into a browser tab. Falls back
+            # to opening a browser tab if web search is off/unconfigured or
+            # returns nothing (e.g. the person just said "search" with no query).
+            if getattr(self.app, "web_search_enabled", False):
+                query_text = clean_text
+                for phrase in ["search for the", "search for a", "search for", "look up the", "look up", "google the", "google", "search"]:
+                    query_text = query_text.replace(phrase, "")
+                query_text = query_text.strip()
+                web_answer = self.handle_web_search(query_text) if query_text else None
+                if web_answer is not None:
+                    return web_answer
             return self.handle_search(text)
             
         # Basic Greetings
@@ -1922,7 +2040,25 @@ class CommandEngine:
                 return f"I've opened {display_name} for you."
             except Exception:
                 return f"I found {target_desktop}, but I couldn't launch it from the host environment."
-                        
+
+        # No .desktop file matched (e.g. Ubuntu's Firefox snap has none).
+        # Fall back to launching a matching binary directly from the host PATH.
+        binary_name = app_target.replace(" ", "-")
+        try:
+            check = subprocess.run(
+                ["flatpak-spawn", "--host", "which", binary_name],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3
+            )
+            if check.returncode == 0 and check.stdout.strip():
+                subprocess.Popen(
+                    ["flatpak-spawn", "--host", binary_name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                self._remember("open_app", app_target=app_target)
+                return f"I've opened {binary_name.title()} for you."
+        except Exception:
+            pass
+
         return "I am still learning so I don't recognize that app."
 
     def handle_time(self):

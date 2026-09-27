@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +15,27 @@ VOICE_MODELS = {
     "female": "en_US-amy-medium.onnx",
     "male": "en_US-ryan-medium.onnx",
 }
+
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"  # symbols, pictographs, emoticons, transport, supplemental
+    "\U00002600-\U000027BF"  # misc symbols & dingbats
+    "\U0001F1E6-\U0001F1FF"  # flags
+    "\U00002190-\U000021FF"  # arrows
+    "\U00002B00-\U00002BFF"  # misc symbols and arrows
+    "\U0000FE0F"             # variation selector
+    "]+",
+    flags=re.UNICODE,
+)
+
+# Tweak this to change what each voice says in the selector popup.
+VOICE_PREVIEW_TEXT = "Hi, I'm Nexa. Choose the voice you'd like me to use."
+
+# Cached preview clips live in the same config dir as everything else, one
+# WAV per voice, keyed by voice_key so they survive across restarts and are
+# only generated once (on first popup open, or if the file's gone missing) --
+# not re-synthesized every time the voice-selector popup is opened.
+_VOICE_PREVIEW_CACHE_DIR = os.path.expanduser("~/.config/nexa/voice-previews")
 DEFAULT_VOICE = "female"
 
 # Where the bundled Piper binary can live: inside the Flatpak (/app/lib/piper)
@@ -63,6 +85,92 @@ class VoiceManager:
         self.on_speech_start = on_speech_start or (lambda: None)
         self.on_speech_end = on_speech_end or (lambda: None)
 
+    def preview_voice(self, voice_key, on_start=None, on_end=None):
+        """Plays the cached intro clip for a specific voice, without
+        changing the currently active voice. Used by the voice-selector
+        popup so tapping a row previews that voice regardless of which
+        one is actually selected. The clip is generated once and cached
+        to disk (~/.config/nexa/voice-previews/<voice_key>.wav) -- if
+        it's already there from a previous run, this just plays it
+        straight away instead of re-running Piper. on_start/on_end are
+        local to this one call (not the shared self.on_speech_start/end),
+        so previewing a voice never pauses wake-word listening the way a
+        real reply does. Returns False immediately (no thread started)
+        if that voice's model isn't installed on disk.
+        """
+        model_name = VOICE_MODELS.get(voice_key)
+        model_path = _first_existing(_model_candidates(model_name)) if model_name else None
+        if not model_path or not self.piper_bin:
+            return False
+        threading.Thread(
+            target=self._preview_worker,
+            args=(voice_key, model_path, on_start, on_end),
+            daemon=True,
+        ).start()
+        return True
+
+    def ensure_voice_previews_cached(self):
+        """Pre-generates any missing preview clips for installed voices, so
+        the very first time the voice-selector popup is opened there's no
+        synthesis delay before a row can be tapped. Safe to call on every
+        startup -- it's a no-op once the cache files already exist. Runs
+        synchronously; call it from a background thread at app launch."""
+        os.makedirs(_VOICE_PREVIEW_CACHE_DIR, exist_ok=True)
+        for voice_key, model_name in VOICE_MODELS.items():
+            cache_path = self._preview_cache_path(voice_key)
+            if os.path.exists(cache_path):
+                continue
+            model_path = _first_existing(_model_candidates(model_name))
+            if not model_path or not self.piper_bin:
+                continue
+            self._render_preview_to_cache(model_path, cache_path)
+
+    def _preview_cache_path(self, voice_key):
+        return os.path.join(_VOICE_PREVIEW_CACHE_DIR, f"{voice_key}.wav")
+
+    def _render_preview_to_cache(self, model_path, cache_path):
+        """Synthesizes straight into the final cache path (via a temp file
+        + atomic rename) rather than through the normal tempfile-then-play
+        flow, since this clip is meant to be kept, not deleted after one
+        playback like _play_wav does."""
+        fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="nexa-preview-", dir=_VOICE_PREVIEW_CACHE_DIR)
+        os.close(fd)
+        try:
+            subprocess.run(
+                [self.piper_bin, "--model", model_path, "--output_file", tmp_path],
+                input=VOICE_PREVIEW_TEXT.encode("utf-8"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=True,
+            )
+            os.replace(tmp_path, cache_path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    def _preview_worker(self, voice_key, model_path, on_start, on_end):
+        if on_start:
+            on_start()
+        try:
+            cache_path = self._preview_cache_path(voice_key)
+            if not os.path.exists(cache_path):
+                os.makedirs(_VOICE_PREVIEW_CACHE_DIR, exist_ok=True)
+                self._render_preview_to_cache(model_path, cache_path)
+            if os.path.exists(cache_path):
+                # _play_wav deletes the file it's given when done (it's
+                # designed for throwaway TTS clips) -- pass a throwaway
+                # copy so the cached original survives for next time.
+                fd, tmp_copy = tempfile.mkstemp(suffix=".wav", prefix="nexa-preview-play-")
+                os.close(fd)
+                shutil.copyfile(cache_path, tmp_copy)
+                self._play_wav(tmp_copy)
+        finally:
+            if on_end:
+                on_end()
+
     def set_voice(self, voice_key):
         """Switches the active Piper voice model. voice_key: 'female' | 'male'.
         Silently keeps the current voice if the requested model isn't bundled
@@ -100,6 +208,8 @@ class VoiceManager:
             return
 
         clean_text = text.replace('"', '').replace('\n', ' ').strip()
+        clean_text = _EMOJI_RE.sub('', clean_text).strip()
+        clean_text = re.sub(r'\s{2,}', ' ', clean_text)
         if not clean_text:
             return
         threading.Thread(target=self._speak_worker, args=(clean_text,), daemon=True).start()
@@ -117,13 +227,16 @@ class VoiceManager:
         finally:
             self.on_speech_end()
 
-    def _synthesize_with_piper(self, text):
-        """Runs the bundled Piper binary, rendering text to a temp WAV file."""
+    def _synthesize_with_piper(self, text, model_path=None):
+        """Runs the bundled Piper binary, rendering text to a temp WAV file.
+        model_path lets callers (e.g. voice preview) synthesize with a
+        specific voice model without disturbing the active self.model_path."""
+        model_path = model_path or self.model_path
         fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="nexa-tts-")
         os.close(fd)
         try:
             subprocess.run(
-                [self.piper_bin, "--model", self.model_path, "--output_file", wav_path],
+                [self.piper_bin, "--model", model_path, "--output_file", wav_path],
                 input=text.encode("utf-8"),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

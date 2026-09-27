@@ -13,6 +13,7 @@ gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk, Pango, GdkPixbuf
  
 import os
+import random
 import sys
 import shutil
 import subprocess
@@ -48,7 +49,7 @@ VOICE_INPUT_MODES = ["Default", "Longer", "Longest"]
 VOICE_INPUT_KEYS = ["default", "longer", "longest"]
 LONG_THINKING_SECONDS = 5.0  # threshold for playing the "finally done" sound cue
 WAKE_RESUME_COOLDOWN_MS = 1500  # buffer after she finishes speaking before wake-word listening resumes, so trailing echo of her own voice can't immediately false-trigger it again
-NEXA_VERSION = "1.1.0"
+NEXA_VERSION = "1.1.1-beta"
 NEXA_GITHUB_URL = "https://github.com/ShiroOSL/nexa-linux"
 NEXA_DEVELOPER_URL = "https://github.com/ShiroOSL"
 
@@ -468,7 +469,7 @@ def enable_autostart():
         "Type=Application\n"
         "Name=Nexa Assistant\n"
         "Comment=Start Nexa Assistant automatically at login\n"
-        "Exec=flatpak run org.nexa.Assistant\n"
+        "Exec=flatpak run org.nexa.Assistant --background\n"
         "Icon=org.nexa.Assistant\n"
         "X-GNOME-Autostart-enabled=true\n"
         "Terminal=false\n"
@@ -517,6 +518,7 @@ class NexaSetupWindow(Adw.ApplicationWindow):
             b".nexa-hero-glow { background: radial-gradient(circle, alpha(#3584e4, 0.38) 0%, "
             b"alpha(#3584e4, 0.10) 45%, alpha(#3584e4, 0) 70%); border-radius: 9999px; }"
             b".nexa-hero-icon { filter: drop-shadow(0 6px 18px alpha(#3584e4, 0.4)); }"
+            b".nexa-eq-bar { background-color: #3584e4; border-radius: 999px; min-width: 5px; } "
         )
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), css_provider,
@@ -867,6 +869,29 @@ class NexaSetupWindow(Adw.ApplicationWindow):
     def _on_setup_firecrawl_key_changed(self, entry_row):
         self._firecrawl_api_key = entry_row.get_text().strip()
 
+    def _on_setup_voice_row_activated(self, *_a):
+        """Opens the voice-selector popup during onboarding. No real
+        VoiceManager exists yet at this point in the wizard (NexaWindow,
+        which owns the real one, hasn't been created) -- so this creates
+        a lightweight throwaway instance just for previewing, with no
+        on_speech_start/end wiring since there's no wake-word engine
+        running yet to need pausing."""
+        VOICE_LABELS = {"female": "Amy", "male": "Ryan"}
+        if self._setup_voice_manager is None:
+            self._setup_voice_manager = VoiceManager()
+            self._setup_voice_manager.load_model()
+            threading.Thread(
+                target=self._setup_voice_manager.ensure_voice_previews_cached, daemon=True
+            ).start()
+
+        def _on_selected(voice_key):
+            self._setup_voice_gender = voice_key
+            self._setup_gender_row_label.set_label(VOICE_LABELS.get(voice_key, voice_key.title()))
+
+        open_voice_selector_dialog(
+            self, self._setup_voice_manager, self._setup_voice_gender, _on_selected
+        )
+
     # --- Step 6: Background, startup, voice -----------------------------------
 
     def _build_background_page(self):
@@ -904,10 +929,18 @@ class NexaSetupWindow(Adw.ApplicationWindow):
         self.setup_voice_row.set_active(True)
         content.append(self.setup_voice_row)
 
-        self.setup_gender_row = Adw.ComboRow(title="Voice", subtitle="Male or female speaking voice")
-        self.setup_gender_row.set_model(Gtk.StringList.new(["Female", "Male"]))
-        self.setup_gender_row.set_selected(0)
+        self._setup_voice_gender = "female"
+        self._setup_voice_manager = None  # created lazily, only if the row is opened
+        VOICE_LABELS = {"female": "Amy", "male": "Ryan"}
+        self.setup_gender_row = Adw.ActionRow(
+            title="Voice", subtitle="Tap to preview and choose Nexa's speaking voice"
+        )
+        self._setup_gender_row_label = Gtk.Label(label=VOICE_LABELS["female"])
+        self.setup_gender_row.add_suffix(self._setup_gender_row_label)
+        self.setup_gender_row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+        self.setup_gender_row.set_activatable(True)
         self.setup_gender_row.set_sensitive(TTS_SUPPORTED)
+        self.setup_gender_row.connect("activated", self._on_setup_voice_row_activated)
         content.append(self.setup_gender_row)
 
         if not TTS_SUPPORTED:
@@ -995,8 +1028,7 @@ class NexaSetupWindow(Adw.ApplicationWindow):
         voice_enabled = self.setup_voice_row.get_active()
         write_config("voice_enabled", "1" if voice_enabled else "0")
 
-        gender_idx = self.setup_gender_row.get_selected()
-        write_config("voice_gender", "female" if gender_idx == 0 else "male")
+        write_config("voice_gender", self._setup_voice_gender)
 
         # Launch-at-startup goes through the XDG Background portal (or the
         # autostart-file fallback), same as toggling it later in Settings --
@@ -1028,6 +1060,7 @@ def add_press_bounce(button, min_scale=0.88):
     provider = Gtk.CssProvider()
 
     def _apply_scale(scale):
+        button._bounce_scale = scale
         css = f"#{node_name} {{ transform: scale({scale:.3f}); }}".encode()
         provider.load_from_data(css)
 
@@ -1035,25 +1068,291 @@ def add_press_bounce(button, min_scale=0.88):
         Gdk.Display.get_default(), provider,
         Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
     )
+    button._bounce_scale = 1.0
     _apply_scale(1.0)
 
-    spring_params = Adw.SpringParams.new(0.55, 1.0, 500.0)
+    press_params = Adw.SpringParams.new(0.55, 1.0, 500.0)
+    release_params = Adw.SpringParams.new(0.50, 1.0, 100.0)
 
-    def _settle_to(target):
+    def _settle_to(target, params):
+        old = getattr(button, "_bounce_anim", None)
+        if old is not None:
+            old.pause()
         start = getattr(button, "_bounce_scale", 1.0)
         spring = Adw.SpringAnimation.new(
             button, start, target,
-            spring_params, Adw.CallbackAnimationTarget.new(_apply_scale),
+            params, Adw.CallbackAnimationTarget.new(_apply_scale),
         )
-        spring.connect("done", lambda *_a: setattr(button, "_bounce_scale", target))
+        button._bounce_anim = spring
         spring.play()
 
     click = Gtk.GestureClick.new()
     click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-    click.connect("pressed", lambda *_a: _settle_to(min_scale))
-    click.connect("released", lambda *_a: _settle_to(1.0))
-    click.connect("cancel", lambda *_a: _settle_to(1.0))
+    click.connect("pressed", lambda *_a: _settle_to(min_scale, press_params))
+    click.connect("released", lambda *_a: _settle_to(1.0, release_params))
+    click.connect("cancel", lambda *_a: _settle_to(1.0, release_params))
     button.add_controller(click)
+
+
+def spring_scale_pop(widget, from_scale=0.85, to_scale=1.0, damping=0.55, mass=1.0, stiffness=500.0):
+    """One-shot spring "pop" (same physics family as add_press_bounce's
+    press/release spring) that scales a widget from from_scale up to
+    to_scale and settles, with a slight overshoot -- used for the
+    QuickCommandPill window's entrance and its response area popping in
+    when new content appears, so those feel like the same physical
+    button-bounce language used everywhere else in the app rather than a
+    plain fade or slide."""
+    node_name = f"nexa-pop-{id(widget)}"
+    widget.set_name(node_name)
+    provider = Gtk.CssProvider()
+    Gtk.StyleContext.add_provider_for_display(
+        Gdk.Display.get_default(), provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+    )
+
+    def _apply_scale(scale):
+        provider.load_from_data(f"#{node_name} {{ transform: scale({scale:.3f}); }}".encode())
+
+    params = Adw.SpringParams.new(damping, mass, stiffness)
+    anim = Adw.SpringAnimation.new(
+        widget, from_scale, to_scale, params, Adw.CallbackAnimationTarget.new(_apply_scale)
+    )
+    anim.play()
+    return anim
+
+
+class VoiceEqualizer(Gtk.Box):
+    """Small animated equalizer bars (10 vertical bars) used above the
+    voice list in the voice-selector popup. Idle by default (short
+    static bars); call start() when a preview clip begins playing and
+    stop() when it ends -- driven by VoiceManager.preview_voice()'s
+    on_start/on_end callbacks, not by guessing playback duration.
+    Each bar eases to a new random height with its own
+    Adw.SpringAnimation (via a CallbackAnimationTarget driving a CSS
+    min-height, the same technique add_press_bounce uses) instead of
+    snapping frame to frame, so the motion reads as smooth and springy
+    rather than jittery."""
+
+    BAR_COUNT = 9
+    IDLE_HEIGHT = 6
+    MAX_HEIGHT = 84
+    MIN_ACTIVE_HEIGHT = 20
+    RETARGET_MS = 220  # how often each bar picks a new height to spring toward
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+        self.set_halign(Gtk.Align.CENTER)
+        self.set_valign(Gtk.Align.CENTER)
+        self.set_size_request(-1, self.MAX_HEIGHT)
+        self._bars = []
+        self._bar_providers = []
+        self._bar_heights = [self.IDLE_HEIGHT] * self.BAR_COUNT
+        self._bar_anims = [None] * self.BAR_COUNT
+        self._spring_params = Adw.SpringParams.new(0.50, 1.0, 100.0)
+        for i in range(self.BAR_COUNT):
+            bar = Gtk.Box()
+            bar.add_css_class("nexa-eq-bar")
+            bar.set_valign(Gtk.Align.CENTER)
+            node_name = f"nexa-eq-bar-{id(self)}-{i}"
+            bar.set_name(node_name)
+            provider = Gtk.CssProvider()
+            Gtk.StyleContext.add_provider_for_display(
+                Gdk.Display.get_default(), provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
+            self._bar_providers.append((node_name, provider))
+            self.append(bar)
+            self._bars.append(bar)
+        self._running = False
+        for i in range(self.BAR_COUNT):
+            self._set_bar_height(i, self.IDLE_HEIGHT)
+
+    def _set_bar_height(self, index, height):
+        self._bar_heights[index] = height
+        node_name, provider = self._bar_providers[index]
+        provider.load_from_data(f"#{node_name} {{ min-height: {height:.1f}px; }}".encode())
+
+    def _spring_bar_to(self, index, target_height):
+        old = self._bar_anims[index]
+        if old is not None:
+            old.pause()
+        anim = Adw.SpringAnimation.new(
+            self._bars[index], self._bar_heights[index], target_height,
+            self._spring_params,
+            Adw.CallbackAnimationTarget.new(lambda h, i=index: self._set_bar_height(i, h)),
+        )
+        self._bar_anims[index] = anim
+        anim.play()
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+
+        def tick():
+            if not self._running:
+                return False
+            for i in range(self.BAR_COUNT):
+                target = random.uniform(self.MIN_ACTIVE_HEIGHT, self.MAX_HEIGHT)
+                self._spring_bar_to(i, target)
+            return True
+
+        tick()
+        GLib.timeout_add(self.RETARGET_MS, tick)
+
+    def stop(self):
+        self._running = False
+        for i in range(self.BAR_COUNT):
+            self._spring_bar_to(i, self.IDLE_HEIGHT)
+
+
+
+def open_voice_selector_dialog(parent_window, voice_manager, current_voice_key, on_selected):
+    """Shared 'Choose a Voice' popup, used by both NexaWindow's Settings
+    and NexaSetupWindow's onboarding. Tapping a row immediately previews
+    that voice (playing its cached intro clip -- see
+    VoiceManager.preview_voice) and selects it; the equalizer only
+    animates while a clip is actually speaking, driven by preview_voice's
+    on_start/on_end rather than a timer. on_selected(voice_key) fires the
+    moment a row is tapped, same as the old ComboRow's notify::selected.
+    """
+    VOICE_LABELS = {"female": "Amy", "male": "Ryan"}
+
+    dialog = Adw.Dialog(content_width=420, content_height=420, title="Choose a Voice")
+    toolbar_view = Adw.ToolbarView()
+    toolbar_view.add_top_bar(Adw.HeaderBar())
+
+    content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+    content.set_margin_top(12)
+    content.set_margin_bottom(28)
+    content.set_margin_start(28)
+    content.set_margin_end(28)
+
+    equalizer = VoiceEqualizer()
+    content.append(equalizer)
+
+    listbox = Gtk.ListBox()
+    listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+    listbox.add_css_class("boxed-list")
+
+    row_voice_keys = {}
+    preview_generation = [0]  # boxed int: lets a stale preview's on_end no-op
+
+    def _on_row_activated(_listbox, row):
+        voice_key = row_voice_keys.get(row)
+        if voice_key is None:
+            return
+        on_selected(voice_key)
+        preview_generation[0] += 1
+        this_generation = preview_generation[0]
+
+        def _on_start():
+            if preview_generation[0] == this_generation:
+                equalizer.start()
+
+        def _on_end():
+            # A previous preview's playback can still be winding down
+            # (stop_audio() interrupts it, but its on_end fires anyway)
+            # after a newer one has already started -- only the most
+            # recent preview is allowed to stop the equalizer, so a
+            # stale on_end here doesn't freeze it mid-animation.
+            if preview_generation[0] == this_generation:
+                equalizer.stop()
+
+        played = voice_manager.preview_voice(
+            voice_key,
+            on_start=lambda: GLib.idle_add(_on_start),
+            on_end=lambda: GLib.idle_add(_on_end),
+        )
+        if not played:
+            toast_overlay.add_toast(Adw.Toast(
+                title=f"I don't have the {VOICE_LABELS.get(voice_key, voice_key)} voice installed yet"
+            ))
+
+    listbox.connect("row-activated", _on_row_activated)
+
+    for voice_key in ("female", "male"):
+        row = Adw.ActionRow(title=html.escape(VOICE_LABELS.get(voice_key, voice_key)))
+        row.set_activatable(True)
+        row.add_suffix(Gtk.Image.new_from_icon_name("media-playback-start-symbolic"))
+        row_voice_keys[row] = voice_key
+        listbox.append(row)
+
+    content.append(listbox)
+
+    toast_overlay = Adw.ToastOverlay()
+    toast_overlay.set_child(content)
+    toolbar_view.set_content(toast_overlay)
+    dialog.set_child(toolbar_view)
+    dialog.connect("closed", lambda *_a: equalizer.stop())
+    dialog.present(parent_window)
+    return dialog
+
+
+def reveal_words_plain(label, full_text, on_progress=None):
+    """Reveals plain (non-markdown) text word by word, each word
+    cross-fading in via animated Pango foreground-alpha over just that
+    word's byte range -- the familiar "streaming reply" look most AI
+    chat UIs use. Runs on a single shared tick loop (one
+    GLib.timeout_add, not one per word) that both reveals new words on a
+    cadence and advances every still-fading word's alpha, so
+    concurrently-fading words never clobber each other's Pango
+    attributes. Standalone (not a NexaWindow method) so both the main
+    chat window and the QuickCommandPill popup can use the exact same
+    animation without duplicating it. on_progress(), if given, is called
+    after every frame (e.g. to auto-scroll a container)."""
+    words = full_text.split(" ")
+    if not words or not words[0]:
+        label.set_text(full_text)
+        return
+
+    FRAME_MS = 30
+    WORD_INTERVAL_MS = 55
+    FADE_MS = 160
+
+    state = {
+        "revealed": "",
+        "next_word_index": 0,
+        "ms_since_last_word": WORD_INTERVAL_MS,  # reveal the first word immediately
+        "pending_fades": [],  # list of [start_byte, end_byte, elapsed_ms]
+    }
+
+    def tick():
+        state["ms_since_last_word"] += FRAME_MS
+
+        if state["ms_since_last_word"] >= WORD_INTERVAL_MS and state["next_word_index"] < len(words):
+            state["ms_since_last_word"] = 0
+            word = words[state["next_word_index"]]
+            prev_revealed = state["revealed"]
+            new_revealed = f"{prev_revealed} {word}" if prev_revealed else word
+            start_byte = len(prev_revealed.encode("utf-8")) + (1 if prev_revealed else 0)
+            end_byte = len(new_revealed.encode("utf-8"))
+            state["revealed"] = new_revealed
+            state["next_word_index"] += 1
+            state["pending_fades"].append([start_byte, end_byte, 0])
+            label.set_text(new_revealed)
+
+        still_fading = []
+        attrs = Pango.AttrList()
+        for fade in state["pending_fades"]:
+            fade[2] += FRAME_MS
+            progress = min(1.0, fade[2] / FADE_MS)
+            alpha = int(progress * 65535)
+            attr = Pango.attr_foreground_alpha_new(alpha)
+            attr.start_index = fade[0]
+            attr.end_index = fade[1]
+            attrs.insert(attr)
+            if progress < 1.0:
+                still_fading.append(fade)
+        state["pending_fades"] = still_fading
+        label.set_attributes(attrs)
+
+        done = state["next_word_index"] >= len(words) and not state["pending_fades"]
+        if on_progress is not None:
+            on_progress()
+        return not done
+
+    GLib.timeout_add(FRAME_MS, tick)
 
 
 class NexaWindow(Adw.ApplicationWindow):
@@ -1129,6 +1428,10 @@ class NexaWindow(Adw.ApplicationWindow):
         self.voice.load_model()
         self.voice.set_voice(self.voice_gender)
         self.voice.set_enabled(self.voice_enabled)
+        # Pre-render voice preview clips in the background so the voice
+        # selector popup never has to wait on Piper the first time it's
+        # opened -- cheap no-op on every launch after the first.
+        threading.Thread(target=self.voice.ensure_voice_previews_cached, daemon=True).start()
         self.stt = VoiceInputEngine(
             on_state_change=self._on_voice_state_change,
             on_result=self._on_voice_result,
@@ -1339,8 +1642,7 @@ class NexaWindow(Adw.ApplicationWindow):
             b"box-shadow: none; border: none; } "
             b"entry.nexa-input text { background: none; }"
             b".nexa-user-bubble { background: linear-gradient(135deg, #4a91f0 0%, #3160c9 100%); "
-            b"color: #ffffff; border-radius: 20px; padding: 10px 16px; "
-            b"box-shadow: 0 2px 8px alpha(#1a4faf, 0.35); } "
+            b"color: #ffffff; border-radius: 20px; padding: 10px 16px; } "
             b".nexa-bot-bubble { background-color: transparent; border-radius: 999px; padding: 10px 16px; }"
             b".nexa-weather-card { background: linear-gradient(135deg, #4a90e2 0%, #2f6fd1 100%); "
             b"border-radius: 22px; padding: 18px 26px; min-width: 260px; } "
@@ -1392,9 +1694,37 @@ class NexaWindow(Adw.ApplicationWindow):
             b"box-shadow: none; outline: none; border: none; background: none; }"
             b".nexa-float-bar entry.nexa-input image.entry_icon { color: inherit; }"
             b".nexa-mic-active { background-color: #e01b24; color: #ffffff; }"
-            b"window.nexa-quick-pill-window { background: none; box-shadow: none; } "
+            b"window.nexa-quick-pill-window, window.nexa-quick-pill-window.background { "
+            b"background: none; box-shadow: none; } "
             b"window.nexa-quick-pill-window decoration { background: none; box-shadow: none; border-radius: 0; } "
-            b".nexa-quick-pill { min-width: 460px; border-radius: 999px; box-shadow: 0 8px 28px alpha(#000000, 0.45); } "
+            b".nexa-quick-pill { min-width: 460px; border-radius: 28px; "
+            b"background-color: @view_bg_color; border: 1px solid alpha(@borders, 0.5); overflow: hidden; } "
+            b"@keyframes nexa-pill-glow-sweep { "
+            b"0% { box-shadow: 0 6px 14px -4px alpha(#4a91f0, 0.0); } "
+            b"8% { box-shadow: 0 6px 16px -2px alpha(#4a91f0, 0.85); } "
+            b"25% { box-shadow: 6px 2px 16px -2px alpha(#5aa1ff, 0.75); } "
+            b"50% { box-shadow: 0 -6px 16px -2px alpha(#7ab8ff, 0.65); } "
+            b"75% { box-shadow: -6px 2px 16px -2px alpha(#5aa1ff, 0.55); } "
+            b"92% { box-shadow: 0 6px 14px -3px alpha(#4a91f0, 0.35); } "
+            b"100% { box-shadow: 0 6px 14px -4px alpha(#4a91f0, 0.0); } "
+            b"} "
+            b".nexa-quick-pill.nexa-pill-glow { "
+            b"animation: nexa-pill-glow-sweep 1.1s ease-out 1; "
+            b"} "
+            b".nexa-quick-pill-input-row entry.nexa-input { background: none; box-shadow: none; border: none; } "
+            b".nexa-quick-pill-input-row entry.nexa-input:focus, "
+            b".nexa-quick-pill-input-row entry.nexa-input:focus-within, "
+            b".nexa-quick-pill-input-row entry.nexa-input text, "
+            b".nexa-quick-pill-input-row entry.nexa-input text:focus { "
+            b"box-shadow: none; outline: none; border: none; background: none; } "
+            b".nexa-pill-separator { background: alpha(@borders, 0.6); margin: 0; } "
+            b".nexa-eq-bar { background-color: #3584e4; border-radius: 999px; min-width: 5px; } "
+            b".nexa-pill-weather-chip { background: linear-gradient(135deg, #4a91f0 0%, #3160c9 100%); "
+            b"border-radius: 18px; padding: 12px 16px; } "
+            b".nexa-pill-music-chip { border-radius: 18px; padding: 12px 16px; } "
+            b".nexa-pill-chip-title { font-weight: 700; font-size: 1.05em; color: #ffffff; } "
+            b".nexa-pill-chip-subtitle { color: alpha(#ffffff, 0.85); font-size: 0.92em; } "
+            b"label.nexa-pill-thinking { font-style: italic; opacity: 0.65; } "
         )
         Gtk.StyleContext.add_provider_for_display(
             self.get_display(), css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -1487,77 +1817,20 @@ class NexaWindow(Adw.ApplicationWindow):
         return True  # tell GTK this is handled -- don't also run its own (sandbox-incompatible) default handler
 
     def _reveal_words(self, label, full_text, markdown=False):
-        """Reveals a bot response word by word, each word cross-fading in
-        (via animated Pango foreground-alpha over just that word's byte
-        range) rather than the whole message appearing at once -- the
-        familiar "streaming reply" look most AI chat UIs use. Runs on a
-        single shared tick loop per message (one GLib.timeout_add, not one
-        per word/animation) that both reveals new words on a cadence and
-        advances every still-fading word's alpha, so concurrently-fading
-        words never clobber each other's Pango attributes -- an earlier,
-        simpler version that gave each word its own independent
-        AttrList/animation caused exactly that: a new word's fade-in would
-        overwrite the whole label's attributes and snap the previous word
-        (if not fully done fading yet) instantly to full opacity."""
-        words = full_text.split(" ")
-        if not words or not words[0]:
-            if markdown:
-                label.set_markup(markdown_to_pango(full_text))
-            else:
-                label.set_text(full_text)
-            return
-
+        """Reveals a bot response word by word (NexaWindow's chat log). The
+        plain-text path delegates to the standalone reveal_words_plain()
+        (shared with QuickCommandPill) so both surfaces animate replies
+        identically; only the markdown path stays here since it needs
+        chat-log-specific handling (see _reveal_words_markdown)."""
         if markdown:
+            words = full_text.split(" ")
+            if not words or not words[0]:
+                label.set_markup(markdown_to_pango(full_text))
+                return
             self._reveal_words_markdown(label, words)
             return
 
-        FRAME_MS = 30
-        WORD_INTERVAL_MS = 55
-        FADE_MS = 160
-
-        state = {
-            "revealed": "",
-            "next_word_index": 0,
-            "ms_since_last_word": WORD_INTERVAL_MS,  # reveal the first word immediately
-            "pending_fades": [],  # list of [start_byte, end_byte, elapsed_ms]
-        }
-
-        def tick():
-            state["ms_since_last_word"] += FRAME_MS
-
-            if state["ms_since_last_word"] >= WORD_INTERVAL_MS and state["next_word_index"] < len(words):
-                state["ms_since_last_word"] = 0
-                word = words[state["next_word_index"]]
-                prev_revealed = state["revealed"]
-                new_revealed = f"{prev_revealed} {word}" if prev_revealed else word
-                start_byte = len(prev_revealed.encode("utf-8")) + (1 if prev_revealed else 0)
-                end_byte = len(new_revealed.encode("utf-8"))
-                state["revealed"] = new_revealed
-                state["next_word_index"] += 1
-                state["pending_fades"].append([start_byte, end_byte, 0])
-                label.set_text(new_revealed)
-
-            still_fading = []
-            attrs = Pango.AttrList()
-            for fade in state["pending_fades"]:
-                fade[2] += FRAME_MS
-                progress = min(1.0, fade[2] / FADE_MS)
-                alpha = int(progress * 65535)
-                attr = Pango.attr_foreground_alpha_new(alpha)
-                attr.start_index = fade[0]
-                attr.end_index = fade[1]
-                attrs.insert(attr)
-                if progress < 1.0:
-                    still_fading.append(fade)
-            state["pending_fades"] = still_fading
-            label.set_attributes(attrs)
-
-            done = state["next_word_index"] >= len(words) and not state["pending_fades"]
-            if not done:
-                GLib.idle_add(self._scroll_to_bottom)
-            return not done
-
-        GLib.timeout_add(FRAME_MS, tick)
+        reveal_words_plain(label, full_text, on_progress=lambda: GLib.idle_add(self._scroll_to_bottom))
 
     def _reveal_words_markdown(self, label, words):
         """Markdown-aware counterpart to _reveal_words' plain-text tick
@@ -1782,6 +2055,29 @@ class NexaWindow(Adw.ApplicationWindow):
         (icon + filename per item, click to open) shown instead of a plain
         text bubble -- same avatar+row layout and reveal style as the
         weather card, keyed off CommandEngine.last_card_data["type"] == "files"."""
+        card = self._build_file_card_content(data)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row.set_halign(Gtk.Align.START)
+        row.set_margin_top(4)
+        row.set_margin_bottom(4)
+
+        avatar = Gtk.Image.new_from_icon_name("org.nexa.Assistant")
+        avatar.set_pixel_size(24)
+        avatar.set_valign(Gtk.Align.START)
+        row.append(avatar)
+        row.append(card)
+
+        row.set_opacity(0)
+        self.chat_box.append(row)
+        self._fade_in_row(row)
+        GLib.idle_add(self._scroll_to_bottom)
+
+    def _build_file_card_content(self, data):
+        """Just the card widget (icon strip + header), no avatar/row
+        wrapper -- shared between the main chat window's _append_file_card
+        and QuickCommandPill's compact reply, so both build the exact same
+        clickable file strip rather than two diverging implementations."""
         files = data.get("files", [])
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -1826,22 +2122,7 @@ class NexaWindow(Adw.ApplicationWindow):
             strip.append(item_button)
 
         card.append(strip_scroller)
-
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        row.set_halign(Gtk.Align.START)
-        row.set_margin_top(4)
-        row.set_margin_bottom(4)
-
-        avatar = Gtk.Image.new_from_icon_name("org.nexa.Assistant")
-        avatar.set_pixel_size(24)
-        avatar.set_valign(Gtk.Align.START)
-        row.append(avatar)
-        row.append(card)
-
-        row.set_opacity(0)
-        self.chat_box.append(row)
-        self._fade_in_row(row)
-        GLib.idle_add(self._scroll_to_bottom)
+        return card
 
     def _analyze_album_art(self, art_path):
         """Loads the cover art and averages it down to a single RGB color
@@ -1960,6 +2241,27 @@ class NexaWindow(Adw.ApplicationWindow):
         each shown only if it has entries, with a status icon+color per
         section (warning red/orange vs a clean green "no issues" state)
         rather than a flat wall of log lines."""
+        card = self._build_diagnostics_card_content(data)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row.set_halign(Gtk.Align.START)
+        row.set_margin_top(4)
+        row.set_margin_bottom(4)
+
+        avatar = Gtk.Image.new_from_icon_name("org.nexa.Assistant")
+        avatar.set_pixel_size(24)
+        avatar.set_valign(Gtk.Align.START)
+        row.append(avatar)
+        row.append(card)
+
+        row.set_opacity(0)
+        self.chat_box.append(row)
+        self._fade_in_row(row)
+        GLib.idle_add(self._scroll_to_bottom)
+
+    def _build_diagnostics_card_content(self, data):
+        """Just the card widget, no avatar/row wrapper -- shared between
+        _append_diagnostics_card and QuickCommandPill's compact reply."""
         errors = data.get("errors", [])
         failed_units = data.get("failed_units", [])
         disk_warnings = data.get("disk_warnings", [])
@@ -2006,22 +2308,7 @@ class NexaWindow(Adw.ApplicationWindow):
         add_section("Failed Services", "process-stop-symbolic", failed_units)
         add_section("Disk Space", "drive-harddisk-symbolic", disk_warnings)
         add_section("Recent Errors", "dialog-error-symbolic", errors, item_prefix="\u2022 ")
-
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        row.set_halign(Gtk.Align.START)
-        row.set_margin_top(4)
-        row.set_margin_bottom(4)
-
-        avatar = Gtk.Image.new_from_icon_name("org.nexa.Assistant")
-        avatar.set_pixel_size(24)
-        avatar.set_valign(Gtk.Align.START)
-        row.append(avatar)
-        row.append(card)
-
-        row.set_opacity(0)
-        self.chat_box.append(row)
-        self._fade_in_row(row)
-        GLib.idle_add(self._scroll_to_bottom)
+        return card
 
     def _append_web_search_card(self, data):
         """"Sources" card shown under a live web search answer -- up to 5
@@ -2029,9 +2316,32 @@ class NexaWindow(Adw.ApplicationWindow):
         real page in the host browser via the OpenURI portal. This is
         attribution/citation, not the answer itself (that's the normal
         text bubble _process_query already appended above this)."""
+        card = self._build_web_search_card_content(data)
+        if card is None:
+            return
+
+        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row2.set_halign(Gtk.Align.START)
+        row2.set_margin_top(2)
+        row2.set_margin_bottom(4)
+
+        spacer = Gtk.Box()
+        spacer.set_size_request(30, 1)
+        row2.append(spacer)
+        row2.append(card)
+
+        row2.set_opacity(0)
+        self.chat_box.append(row2)
+        self._fade_in_row(row2)
+        GLib.idle_add(self._scroll_to_bottom)
+
+    def _build_web_search_card_content(self, data):
+        """Just the card widget (or None if there are no results), no
+        row/spacer wrapper -- shared between _append_web_search_card and
+        QuickCommandPill's compact reply."""
         results = data.get("results", [])
         if not results:
-            return
+            return None
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         card.add_css_class("nexa-websearch-card")
@@ -2079,20 +2389,7 @@ class NexaWindow(Adw.ApplicationWindow):
             link_button.set_child(row_box)
             card.append(link_button)
 
-        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        row2.set_halign(Gtk.Align.START)
-        row2.set_margin_top(2)
-        row2.set_margin_bottom(4)
-
-        spacer = Gtk.Box()
-        spacer.set_size_request(30, 1)
-        row2.append(spacer)
-        row2.append(card)
-
-        row2.set_opacity(0)
-        self.chat_box.append(row2)
-        self._fade_in_row(row2)
-        GLib.idle_add(self._scroll_to_bottom)
+        return card
 
     def _scroll_to_bottom(self):
         adjustment = self.scrolled.get_vadjustment()
@@ -2585,11 +2882,18 @@ class NexaWindow(Adw.ApplicationWindow):
             tts_note_row.add_prefix(Gtk.Image.new_from_icon_name("dialog-information-symbolic"))
             voice_group.add(tts_note_row)
 
-        gender_row = Adw.ComboRow(title="Voice", subtitle="Male or female speaking voice")
-        gender_row.set_model(Gtk.StringList.new(["Female", "Male"]))
-        gender_row.set_selected(0 if self.voice_gender == "female" else 1)
+        gender_row = Adw.ActionRow(
+            title="Voice", subtitle="Tap to preview and choose Nexa's speaking voice"
+        )
+        VOICE_LABELS = {"female": "Amy", "male": "Ryan"}
+        gender_row_label = Gtk.Label(
+            label=VOICE_LABELS.get(self.voice_gender, self.voice_gender.title())
+        )
+        gender_row.add_suffix(gender_row_label)
+        gender_row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+        gender_row.set_activatable(True)
         gender_row.set_sensitive(TTS_SUPPORTED)
-        gender_row.connect("notify::selected", self._on_voice_gender_changed)
+        gender_row.connect("activated", lambda *_a: self._open_voice_selector(gender_row_label))
         voice_group.add(gender_row)
 
         listening_row = Adw.ComboRow(title="Listening Time", subtitle="How long Nexa waits after you stop talking before responding")
@@ -2630,24 +2934,27 @@ class NexaWindow(Adw.ApplicationWindow):
         # --- Background & Shortcuts ------------------------------------------------
         access_page = _tab_page()
         access_group = Adw.PreferencesGroup()
-        access_group.set_title(html.escape("Background & Shortcuts"))
-        access_group.set_description("How Nexa keeps running and how you can bring her back quickly.")
-
-        startup_row = Adw.SwitchRow(
-            title="Launch at Startup",
-            subtitle="Start Nexa automatically when you log in",
-        )
-        startup_row.set_active(self.launch_at_startup)
-        startup_row.connect("notify::active", self._on_launch_at_startup_toggled)
-        access_group.add(startup_row)
+        access_group.set_title(html.escape("Background Service"))
+        access_group.set_description("Let Nexa stay ready in the background, so wake word, the "
+                                      "tray icon, and the quick command hotkey work even with no window open.")
 
         background_row = Adw.SwitchRow(
-            title="Run in Background",
-            subtitle="Keep Nexa running when you close the window, instead of quitting, so she reopens instantly",
+            title="Allow Nexa to Run in the Background",
+            subtitle="Keeps Nexa's service alive when you close the window, instead of quitting, "
+                      "so wake word, the tray icon, and the quick command hotkey keep working",
         )
         background_row.set_active(self.run_in_background)
         background_row.connect("notify::active", self._on_background_toggled)
         access_group.add(background_row)
+
+        startup_row = Adw.SwitchRow(
+            title="Start Background Service at Login",
+            subtitle="Starts Nexa's background service automatically when you log in \u2014 no window "
+                      "opens, it just becomes ready in the background",
+        )
+        startup_row.set_active(self.launch_at_startup)
+        startup_row.connect("notify::active", self._on_launch_at_startup_toggled)
+        access_group.add(startup_row)
 
         tray_row = Adw.SwitchRow(
             title="System Tray Icon",
@@ -2669,6 +2976,16 @@ class NexaWindow(Adw.ApplicationWindow):
         quick_command_hotkey_row.connect("notify::active", self._on_quick_command_hotkey_toggled)
         access_group.add(quick_command_hotkey_row)
 
+        # These three only make sense with the background service on -- grey
+        # them out (rather than hiding them) so it's clear why, and re-enable
+        # instantly if the person flips the main toggle back on.
+        self._startup_row = startup_row
+        self._tray_row = tray_row
+        self._quick_command_hotkey_row = quick_command_hotkey_row
+        self._bg_dependent_rows = [startup_row, tray_row, quick_command_hotkey_row]
+        for row in self._bg_dependent_rows:
+            row.set_sensitive(self.run_in_background)
+
         access_page.add(access_group)
         view_stack.add_titled_with_icon(access_page, "access", "Background", "preferences-system-symbolic")
 
@@ -2686,10 +3003,10 @@ class NexaWindow(Adw.ApplicationWindow):
 
         connected_apps_row = Adw.ActionRow(
             title="Connected Apps",
-            subtitle=self._connected_apps_subtitle(),
+            subtitle="Under construction \u2014 not available yet",
         )
-        connected_apps_row.set_activatable(True)
-        connected_apps_row.connect("activated", self._open_connected_apps_dialog)
+        connected_apps_row.set_activatable(False)
+        connected_apps_row.set_sensitive(False)
         connected_apps_row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
         self._connected_apps_row = connected_apps_row
         extend_group.add(connected_apps_row)
@@ -2715,11 +3032,18 @@ class NexaWindow(Adw.ApplicationWindow):
         wc = self.training_data.counts()
         self._training_export_row = Adw.ActionRow(
             title="Export Training Data",
-            subtitle=f"{wc} wake word clips saved on this device",
+            subtitle=f"{wc} wake word clips saved on this device. Export the file, then "
+                     "email it to hello.nexa.assistant@gmail.com if you'd like to help "
+                     "improve wake word detection \u2014 totally optional.",
         )
+        self._training_export_row.set_subtitle_lines(0)
         export_button = Gtk.Button(label="Export", valign=Gtk.Align.CENTER)
         export_button.connect("clicked", self.on_export_training_data)
         self._training_export_row.add_suffix(export_button)
+        email_button = Gtk.Button(label="Email", valign=Gtk.Align.CENTER)
+        email_button.set_tooltip_text("Opens your email app with the address filled in \u2014 attach the exported file yourself")
+        email_button.connect("clicked", self._on_email_training_data)
+        self._training_export_row.add_suffix(email_button)
         clear_button = Gtk.Button(label="Clear", valign=Gtk.Align.CENTER)
         clear_button.add_css_class("destructive-action")
         clear_button.connect("clicked", self.on_clear_training_data)
@@ -2938,7 +3262,19 @@ class NexaWindow(Adw.ApplicationWindow):
     def _refresh_training_export_subtitle(self):
         if self._training_export_row is not None:
             wc = self.training_data.counts()
-            self._training_export_row.set_subtitle(f"{wc} wake word samples collected")
+            self._training_export_row.set_subtitle(
+                f"{wc} wake word clips saved on this device. Export the file, then "
+                "email it to hello.nexa.assistant@gmail.com if you'd like to help "
+                "improve wake word detection \u2014 totally optional."
+            )
+
+    def _on_email_training_data(self, _button):
+        subject = urllib.parse.quote("Nexa wake word training data")
+        body = urllib.parse.quote(
+            "Hi! I exported my Nexa training data and attached it below.\n\n"
+            "(Please attach the exported .zip file before sending.)"
+        )
+        self._open_uri(f"mailto:hello.nexa.assistant@gmail.com?subject={subject}&body={body}")
 
     def on_export_training_data(self, _button):
         if not self.training_data.has_any_data():
@@ -3065,6 +3401,21 @@ class NexaWindow(Adw.ApplicationWindow):
             self._show_prefs_toast(f"I don't have the {key} voice installed yet \u2014 check the setup docs to download it.")
             combo_row.set_selected(0 if self.voice_gender == "female" else 1)
 
+    def _open_voice_selector(self, gender_row_label):
+        """Opens the 'Choose a Voice' popup from Settings. Selecting a row
+        applies it as the actual active voice immediately (previewing IS
+        selecting here, per the popup's design) and updates the row's
+        suffix label to match."""
+        VOICE_LABELS = {"female": "Amy", "male": "Ryan"}
+
+        def _on_selected(voice_key):
+            if self.voice.set_voice(voice_key):
+                self.voice_gender = voice_key
+                write_config("voice_gender", voice_key)
+                gender_row_label.set_label(VOICE_LABELS.get(voice_key, voice_key.title()))
+
+        open_voice_selector_dialog(self, self.voice, self.voice_gender, _on_selected)
+
     def _on_voice_input_mode_changed(self, combo_row, _param):
         idx = combo_row.get_selected()
         if idx == Gtk.INVALID_LIST_POSITION:
@@ -3103,6 +3454,20 @@ class NexaWindow(Adw.ApplicationWindow):
     def _on_background_toggled(self, switch_row, _param):
         self.run_in_background = switch_row.get_active()
         write_config("run_in_background", "1" if self.run_in_background else "0")
+
+        for row in getattr(self, "_bg_dependent_rows", []):
+            row.set_sensitive(self.run_in_background)
+
+        # Tray icon, quick command hotkey, and launch-at-login only make
+        # sense with the background service on -- if it's turned off, turn
+        # them off too rather than leaving them "on" but non-functional.
+        if not self.run_in_background:
+            if self.show_tray_icon:
+                self._tray_row.set_active(False)
+            if self.quick_command_hotkey_enabled:
+                self._quick_command_hotkey_row.set_active(False)
+            if self.launch_at_startup:
+                self._startup_row.set_active(False)
 
     def _on_tray_icon_toggled(self, switch_row, _param):
         self.show_tray_icon = switch_row.get_active()
@@ -3163,24 +3528,108 @@ class NexaWindow(Adw.ApplicationWindow):
 
 class QuickCommandPill(Gtk.Window):
     """Small floating command bar opened from the tray icon's "Quick Command"
-    item. Lets the user type or speak a command without opening the full
-    window; on submit it hands the text to NexaWindow and auto-sends it."""
+    item. Siri/Gemini-style: typing or speaking a command shows Nexa's
+    reply above the input, all inside one continuous rounded shape (not
+    two stacked boxes) with Nexa's usual glow behind her avatar. Weather,
+    music, files, diagnostics, and web-search cards all render inline
+    here too (the same widgets the main chat window builds, reused
+    directly) -- nothing hands off to the main window anymore. The
+    response area caps at MAX_RESPONSE_HEIGHT and scrolls internally
+    past that, so a long reply grows the pill up to a point and then
+    scrolls instead of the window growing without bound."""
+
+    MAX_RESPONSE_HEIGHT = 340
 
     def __init__(self, app_window):
-        super().__init__(transient_for=app_window, modal=False)
+        # modal=True (with transient_for already set) is what actually
+        # keeps a GTK4 window reliably above its parent across window
+        # managers -- there is no cross-desktop "always on top of every
+        # window" in GTK4 (gtk_window_set_keep_above was removed with no
+        # replacement, and gtk4-layer-shell -- the real launcher-style
+        # always-on-top mechanism -- explicitly doesn't work on
+        # GNOME-Wayland, which is this app's main target). Modal-above-
+        # parent is the closest reliable equivalent available here.
+        super().__init__(transient_for=app_window, modal=True)
         self.app_window = app_window
         self._stt_swapped = False
+        self._response_extra = None
         self.set_decorated(False)
         self.set_resizable(False)
         self.add_css_class("nexa-quick-pill-window")
 
+        # One continuous rounded card -- the response sits inside the same
+        # shape as the input row, not a separate box stacked on top of it.
+        self.pill_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.pill_card.add_css_class("nexa-quick-pill")
+        self.pill_card.set_margin_top(16)
+        self.pill_card.set_margin_bottom(16)
+        self.pill_card.set_margin_start(16)
+        self.pill_card.set_margin_end(16)
+
+        # Response area: collapsed until the first reply comes back, then
+        # expanded inside Gtk.Revealer -- the widget GTK actually provides
+        # for animating a child's height in/out (a hand-rolled min-height
+        # spring on a plain Gtk.Box doesn't work: GTK boxes still request
+        # their children's full natural size regardless of min-height, so
+        # nothing would actually clip during the animation). The
+        # transition is tuned to feel springy (slight overshoot) rather
+        # than a flat ease.
+        self.response_revealer = Gtk.Revealer(
+            transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN,
+            transition_duration=420,
+            reveal_child=False,
+        )
+        self.response_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.response_inner.set_margin_top(18)
+        self.response_inner.set_margin_bottom(14)
+        self.response_inner.set_margin_start(20)
+        self.response_inner.set_margin_end(20)
+
+        response_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        avatar_overlay = Gtk.Overlay()
+        glow = Gtk.Box()
+        glow.add_css_class("nexa-hero-glow")
+        glow.set_size_request(34, 34)
+        avatar_overlay.set_child(glow)
+        avatar = Gtk.Image.new_from_icon_name("org.nexa.Assistant")
+        avatar.add_css_class("nexa-hero-icon")
+        avatar.set_pixel_size(20)
+        avatar.set_halign(Gtk.Align.CENTER)
+        avatar.set_valign(Gtk.Align.CENTER)
+        avatar_overlay.add_overlay(avatar)
+        response_header.append(avatar_overlay)
+        self.response_inner.append(response_header)
+
+        self.response_label = Gtk.Label(wrap=True, xalign=0)
+        self.response_label.set_selectable(True)
+        self.response_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.response_inner.append(self.response_label)
+
+        # Caps how tall the response area can grow: past
+        # MAX_RESPONSE_HEIGHT the content scrolls internally instead of
+        # the whole pill window continuing to expand for a long reply or
+        # a big card.
+        response_scroller = Gtk.ScrolledWindow()
+        response_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        response_scroller.set_max_content_height(self.MAX_RESPONSE_HEIGHT)
+        response_scroller.set_propagate_natural_height(True)
+        response_scroller.set_child(self.response_inner)
+
+        self.response_revealer.set_child(response_scroller)
+
+        separator = Gtk.Separator()
+        separator.add_css_class("nexa-pill-separator")
+        self.response_separator_revealer = Gtk.Revealer(
+            transition_type=Gtk.RevealerTransitionType.CROSSFADE, reveal_child=False
+        )
+        self.response_separator_revealer.set_child(separator)
+
         pill_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        pill_box.add_css_class("nexa-float-bar")
-        pill_box.add_css_class("nexa-quick-pill")
-        pill_box.set_margin_top(16)
-        pill_box.set_margin_bottom(16)
-        pill_box.set_margin_start(16)
-        pill_box.set_margin_end(16)
+        pill_box.add_css_class("nexa-quick-pill-input-row")
+        pill_box.set_margin_top(6)
+        pill_box.set_margin_bottom(6)
+        pill_box.set_margin_start(6)
+        pill_box.set_margin_end(6)
 
         self.mic_button = Gtk.Button()
         self.mic_button.set_icon_name("audio-input-microphone-symbolic")
@@ -3193,7 +3642,7 @@ class QuickCommandPill(Gtk.Window):
 
         self.entry = Gtk.Entry()
         self.entry.add_css_class("nexa-input")
-        self.entry.set_placeholder_text("Type a command...")
+        self.entry.set_placeholder_text("Ask Nexa anything...")
         self.entry.set_hexpand(True)
         self.entry.connect("activate", self.on_submit)
         EntrySpellChecker(self.entry)
@@ -3207,15 +3656,91 @@ class QuickCommandPill(Gtk.Window):
         add_press_bounce(send_button)
         pill_box.append(send_button)
 
+        # Response area sits above the input row (matches how the pill
+        # originally looked). Note: on Wayland (GNOME's default) a
+        # toplevel window cannot be programmatically repositioned by the
+        # app at all -- there's no absolute coordinate system exposed at
+        # the protocol level, and GTK4 removed the old move() API for
+        # exactly that reason. So there's no way to keep the window's
+        # bottom edge fixed while it grows taller; the window manager
+        # owns placement, and the pill will grow from wherever it was
+        # originally placed, same as any other toplevel window.
+        self.pill_card.append(self.response_revealer)
+        self.pill_card.append(self.response_separator_revealer)
+        self.pill_card.append(pill_box)
+
         # Draggable: any drag on the handle moves the whole window.
         handle = Gtk.WindowHandle()
-        handle.set_child(pill_box)
+        handle.set_child(self.pill_card)
         self.set_child(handle)
+
+        # Dragging the window (via the WindowHandle above) can itself
+        # cause a brief is-active blip on some compositors, which the
+        # click-outside debounce below would otherwise misread as
+        # click-away and close the pill mid-drag. Track the drag
+        # explicitly so the close-check is suppressed for its duration.
+        self._dragging = False
+        drag_gesture = Gtk.GestureDrag.new()
+        self._drag_protect_until = 0
+        drag_gesture.connect("drag-begin", self._on_drag_begin)
+        drag_gesture.connect("drag-end", self._on_drag_end)
+        handle.add_controller(drag_gesture)
 
         key_controller = Gtk.EventControllerKey()
         key_controller.connect("key-pressed", self._on_key_pressed)
         self.add_controller(key_controller)
         self.connect("close-request", self._on_close_request)
+        # Belt-and-braces: grab_focus() called immediately after present()
+        # can occasionally race the window not being mapped yet, so also
+        # grab focus once it definitely is.
+        self.connect("map", lambda *_a: self.entry.grab_focus())
+        self.connect("map", lambda *_a: spring_scale_pop(self.pill_card, from_scale=0.85, to_scale=1.0))
+        # Close on click-outside, Gemini/Siri-style: is-active flips False
+        # the moment focus moves to any other window (another app,
+        # another instance of NexaWindow, etc). Guarded by a short
+        # just-opened grace period, since presenting the window itself
+        # can momentarily fire is-active=False/True on some window
+        # managers before settling, which would otherwise self-close the
+        # pill the instant it opens.
+        self._just_opened_guard_active = True
+        GLib.timeout_add(250, self._clear_just_opened_guard)
+        self.connect("notify::is-active", self._on_active_changed)
+
+    def _clear_just_opened_guard(self):
+        self._just_opened_guard_active = False
+        return False
+
+    def _on_drag_begin(self, *_args):
+        self._dragging = True
+
+    def _on_drag_end(self, *_args):
+        # The compositor takes over the window move, so drag-end fires
+        # almost instantly and the focus loss (is-active -> False) comes
+        # AFTER it. Keep the pill protected for a few seconds so that
+        # focus loss is not mistaken for a click-outside.
+        self._dragging = False
+        self._drag_protect_until = GLib.get_monotonic_time() + 3_000_000
+
+    def _drag_protected(self):
+        return self._dragging or GLib.get_monotonic_time() < self._drag_protect_until
+
+    def _on_active_changed(self, *_args):
+        if self._just_opened_guard_active or self._drag_protected():
+            return
+        if self.is_active():
+            return
+        # Debounce: is-active can blip False->True internally when focus
+        # moves between widgets inside this same window (clicking the mic
+        # button, focusing the entry, etc.) -- only treat it as genuine
+        # click-away if the window is STILL inactive a moment later.
+        GLib.timeout_add(120, self._check_still_inactive)
+
+    def _check_still_inactive(self):
+        if self._drag_protected():
+            return False
+        if not self._just_opened_guard_active and not self.is_active():
+            self.close()
+        return False
 
     def _on_key_pressed(self, _controller, keyval, _keycode, _state):
         if keyval == Gdk.KEY_Escape:
@@ -3227,16 +3752,202 @@ class QuickCommandPill(Gtk.Window):
         self._restore_stt_callbacks(stop_if_recording=True)
         return False
 
+    def _spring_reveal(self, show):
+        """Expands/collapses the response area. Gtk.Revealer's
+        reveal_child triggers its built-in transition -- tuned above via
+        transition_duration for a springy feel -- since Revealer has no
+        externally-animatable property a real Adw.SpringAnimation could
+        drive directly (only reveal_child, a plain boolean). A real spring
+        (spring_scale_pop) additionally pops the inner content itself on
+        the way in, matching the same button-bounce physics used
+        elsewhere in the app."""
+        self.response_revealer.set_reveal_child(show)
+        self.response_separator_revealer.set_reveal_child(show)
+        if show:
+            spring_scale_pop(self.response_inner, from_scale=0.92, to_scale=1.0)
+
     def on_submit(self, *_args):
         text = self.entry.get_text().strip()
         if not text:
             return
         self._restore_stt_callbacks(stop_if_recording=False)
-        self.close()
-        self.app_window.set_visible(True)
-        self.app_window.present()
-        self.app_window.entry.set_text(text)
-        self.app_window.on_send(self.app_window.entry)
+        self.entry.set_text("")
+        self.entry.set_sensitive(False)
+
+        self.response_label.add_css_class("nexa-pill-thinking")
+        self.response_label.set_text("Thinking…")
+        # One-shot glow sweep on send. Removing the class then re-adding it
+        # forces the CSS animation to restart from 0%, since GTK won't
+        # replay an animation on a class that's already applied -- but the
+        # remove and re-add must land in two genuinely separate frames, or
+        # GTK's style engine coalesces them into a no-op (an idle_add queued
+        # in the same tick as the removal isn't a reliable enough gap, which
+        # is why the sweep sometimes silently failed to play). A short
+        # real-time timeout guarantees an actual elapsed frame in between.
+        self._glow_restart_id = getattr(self, "_glow_restart_id", None)
+        if self._glow_restart_id:
+            GLib.source_remove(self._glow_restart_id)
+            self._glow_restart_id = None
+        self.pill_card.remove_css_class("nexa-pill-glow")
+
+        def _restart_glow():
+            self._glow_restart_id = None
+            if self.pill_card.get_root() is not None:
+                self.pill_card.add_css_class("nexa-pill-glow")
+            return False
+
+        self._glow_restart_id = GLib.timeout_add(30, _restart_glow)
+        self._spring_reveal(True)
+
+        threading.Thread(target=self._process_pill_query, args=(text,), daemon=True).start()
+
+    def _process_pill_query(self, text):
+        response = self.app_window.engine.parse(text)
+        card_data = self.app_window.engine.last_card_data
+        self.app_window.engine.last_card_data = None
+        self.app_window.voice.speak(response)
+
+        def finish():
+            self.entry.set_sensitive(True)
+            self.entry.grab_focus()
+            card_type = card_data.get("type") if card_data else None
+            if card_type == "weather":
+                self._show_compact_weather(response, card_data)
+            elif card_type == "music":
+                self._show_compact_music(response, card_data)
+            elif card_type == "files":
+                self._show_generic_card(response, self.app_window._build_file_card_content(card_data))
+            elif card_type == "diagnostics":
+                self._show_generic_card(response, self.app_window._build_diagnostics_card_content(card_data))
+            elif card_type == "web_search":
+                self._show_generic_card(response, self.app_window._build_web_search_card_content(card_data))
+            else:
+                self._clear_response_extra()
+                reveal_words_plain(self.response_label, response)
+            return False
+
+        GLib.idle_add(finish)
+
+    def _clear_response_extra(self):
+        """Removes any compact weather/music/generic card from a previous
+        query, and the "Thinking…" styling, before showing a new
+        plain-text reply or another card."""
+        self.response_label.remove_css_class("nexa-pill-thinking")
+        if self._response_extra is not None:
+            self.response_inner.remove(self._response_extra)
+            self._response_extra = None
+
+    def _show_generic_card(self, response, card_widget):
+        """Shows a reused card widget (files/diagnostics/web-search --
+        built by the corresponding NexaWindow._build_*_card_content, so
+        the pill never has a second, diverging implementation of these)
+        under the plain-text reply. card_widget may be None (e.g. an
+        empty web-search result set), in which case only the text shows."""
+        self._clear_response_extra()
+        reveal_words_plain(self.response_label, response)
+        if card_widget is not None:
+            self.response_inner.append(card_widget)
+            self._response_extra = card_widget
+
+    def _show_compact_weather(self, response, data):
+        """Siri-style compact weather chip: icon + short text over a blue
+        gradient, sized to sit naturally under the pill's response area
+        rather than reproducing the full chat window's larger weather
+        card."""
+        self._clear_response_extra()
+        reveal_words_plain(self.response_label, response)
+
+        chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        chip.add_css_class("nexa-pill-weather-chip")
+
+        icon_key = data.get("icon", "sunny")
+        icon_widget = None
+        icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+        if icon_theme.has_icon(icon_key):
+            icon_widget = Gtk.Image.new_from_icon_name(icon_key)
+        else:
+            icon_path = f"/app/share/nexa/weather-icons/{icon_key}.svg"
+            if not os.path.exists(icon_path):
+                icon_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "..", "data", "weather-icons", f"{icon_key}.svg"
+                )
+            if os.path.exists(icon_path):
+                icon_widget = Gtk.Picture.new_for_filename(icon_path)
+                icon_widget.set_content_fit(Gtk.ContentFit.CONTAIN)
+        if icon_widget is not None:
+            icon_widget.set_size_request(40, 40)
+            icon_widget.set_valign(Gtk.Align.CENTER)
+            chip.append(icon_widget)
+
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        text_box.set_valign(Gtk.Align.CENTER)
+        location = data.get("location")
+        top_label = Gtk.Label(xalign=0)
+        top_label.add_css_class("nexa-pill-chip-title")
+        top_label.set_label(f"{data.get('temp_c', '?')}°C" + (f"  ·  {location}" if location else ""))
+        text_box.append(top_label)
+        condition_label = Gtk.Label(xalign=0)
+        condition_label.add_css_class("nexa-pill-chip-subtitle")
+        condition_label.set_label(str(data.get("condition", "")).strip().capitalize())
+        text_box.append(condition_label)
+        chip.append(text_box)
+
+        self.response_inner.append(chip)
+        self._response_extra = chip
+
+    def _show_compact_music(self, response, data):
+        """Siri-style compact Now Playing chip: title/artist over a
+        gradient derived from the track's own album art color, reusing
+        NexaWindow's existing art-color analysis rather than duplicating
+        it."""
+        self._clear_response_extra()
+        reveal_words_plain(self.response_label, response)
+
+        title = data.get("title") or "Unknown Track"
+        artist = data.get("artist")
+        art_path = data.get("art_path")
+        bg_hex, text_hex = "#2b2b33", "#ffffff"
+        if art_path and os.path.exists(art_path):
+            rgb = self.app_window._analyze_album_art(art_path)
+            if rgb:
+                bg_hex, text_hex = self.app_window._music_card_colors(rgb)
+
+        chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        chip.add_css_class("nexa-pill-music-chip")
+        unique_class = f"nexa-pill-music-chip-{id(chip)}"
+        chip.add_css_class(unique_class)
+        css = (
+            f".{unique_class} {{ background: linear-gradient(135deg, {bg_hex} 0%, "
+            f"alpha({bg_hex}, 0.75) 100%); }} "
+            f".{unique_class} .nexa-pill-chip-title {{ color: {text_hex}; }} "
+            f".{unique_class} .nexa-pill-chip-subtitle {{ color: alpha({text_hex}, 0.75); }}"
+        )
+        provider = Gtk.CssProvider()
+        provider.load_from_data(css.encode())
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        note_icon = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
+        note_icon.set_pixel_size(28)
+        note_icon.set_valign(Gtk.Align.CENTER)
+        chip.append(note_icon)
+
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        text_box.set_valign(Gtk.Align.CENTER)
+        title_label = Gtk.Label(label=title, xalign=0)
+        title_label.add_css_class("nexa-pill-chip-title")
+        title_label.set_ellipsize(Pango.EllipsizeMode.END)
+        text_box.append(title_label)
+        if artist:
+            artist_label = Gtk.Label(label=artist, xalign=0)
+            artist_label.add_css_class("nexa-pill-chip-subtitle")
+            artist_label.set_ellipsize(Pango.EllipsizeMode.END)
+            text_box.append(artist_label)
+        chip.append(text_box)
+
+        self.response_inner.append(chip)
+        self._response_extra = chip
 
     # --- Voice input: temporarily borrow the shared STT engine's callbacks --------
     def on_mic_clicked(self, _button):
@@ -3253,8 +3964,10 @@ class QuickCommandPill(Gtk.Window):
         stt = self.app_window.stt
         self._orig_on_result = stt.on_result
         self._orig_on_partial_result = stt.on_partial_result
+        self._orig_on_state_change = stt.on_state_change
         stt.on_result = self._pill_on_result
         stt.on_partial_result = self._pill_on_partial_result
+        stt.on_state_change = self._pill_on_state_change
         self._stt_swapped = True
 
     def _restore_stt_callbacks(self, stop_if_recording):
@@ -3264,7 +3977,15 @@ class QuickCommandPill(Gtk.Window):
         if self._stt_swapped:
             stt.on_result = self._orig_on_result
             stt.on_partial_result = self._orig_on_partial_result
+            stt.on_state_change = self._orig_on_state_change
             self._stt_swapped = False
+            # The main window's mic button was frozen (not receiving
+            # state updates) while the pill borrowed the callbacks --
+            # sync it back to idle now that borrowing has ended (by this
+            # point stt has genuinely stopped recording/transcribing),
+            # so it doesn't show a stale icon next time the main window
+            # is shown.
+            self._orig_on_state_change("idle")
 
     def _pill_on_partial_result(self, text):
         def apply():
@@ -3280,6 +4001,30 @@ class QuickCommandPill(Gtk.Window):
             return False
         GLib.idle_add(apply)
 
+    def _pill_on_state_change(self, state):
+        """Mirrors NexaWindow._on_voice_state_change but drives this
+        pill's own mic button instead of the main window's -- otherwise
+        clicking the pill's mic left it visually frozen while the real
+        state changes were still being reported to the (hidden) main
+        window's button."""
+        def apply():
+            self.mic_button.remove_css_class("destructive-action")
+            self.mic_button.remove_css_class("suggested-action")
+            self.mic_button.set_sensitive(True)
+            if state == "recording":
+                self.mic_button.set_icon_name("media-playback-stop-symbolic")
+                self.mic_button.add_css_class("destructive-action")
+                self.mic_button.set_tooltip_text("Listening... click to stop")
+            elif state == "transcribing":
+                self.mic_button.set_icon_name("content-loading-symbolic")
+                self.mic_button.set_sensitive(False)
+                self.mic_button.set_tooltip_text("Transcribing...")
+            else:
+                self.mic_button.set_icon_name("audio-input-microphone-symbolic")
+                self.mic_button.set_tooltip_text("Voice input")
+            return False
+        GLib.idle_add(apply)
+
 
 class NexaApplication(Adw.Application):
     def __init__(self):
@@ -3291,6 +4036,7 @@ class NexaApplication(Adw.Application):
         self.tray = None
         self._quick_pill = None
         self._pending_quick_command = False
+        self._start_hidden = False
         self.global_shortcut = None
 
         quit_action = Gio.SimpleAction.new("quit", None)
@@ -3305,6 +4051,7 @@ class NexaApplication(Adw.Application):
         forwards here instead of do_activate when the app is single-instance."""
         args = command_line.get_arguments()
         self._pending_quick_command = "--quick-command" in args[1:]
+        self._start_hidden = "--background" in args[1:]
         self.activate()
         return 0
 
@@ -3320,10 +4067,12 @@ class NexaApplication(Adw.Application):
             # Reuse the existing pill if it's already open instead of stacking another.
             if self._quick_pill is not None:
                 self._quick_pill.present()
+                self._quick_pill.entry.grab_focus()
                 return False
             self._quick_pill = QuickCommandPill(self.win)
             self._quick_pill.connect("close-request", lambda *_a: self._clear_quick_pill())
             self._quick_pill.present()
+            self._quick_pill.entry.grab_focus()
             return False
         GLib.idle_add(apply)
 
@@ -3381,6 +4130,13 @@ class NexaApplication(Adw.Application):
         if self._pending_quick_command and isinstance(self.win, NexaWindow):
             self._pending_quick_command = False
             self._tray_quick_command()
+        elif self._start_hidden and isinstance(self.win, NexaWindow):
+            # Launched via "Start Background Service at Login" (--background):
+            # the service (wake word, tray, hotkey) is already up from
+            # start_tray()/start_global_shortcut() above -- no window needed.
+            # Setup wizard is exempt: there's no config yet to run a
+            # background service with, so it still needs to show.
+            pass
         else:
             self.win.present()
 

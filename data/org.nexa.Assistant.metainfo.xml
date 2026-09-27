@@ -53,6 +53,11 @@
   </content_rating>
 
   <releases>
+    <release version="1.1.1-beta" date="2026-09-27">
+      <description>
+        <p>Tagged as beta since Nexa is still under active development and not fully stable yet. Fixes a pill drag-to-close bug and a rare STT deadlock, adds new small-talk commands, fixes web search routing, and polishes the command pill and background service settings.</p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-09-01">
       <description>
         <p>Sandbox and licensing hardening, plus a wake-word reliability fix.</p>
