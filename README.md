@@ -38,15 +38,25 @@ see what people think Nexa should become next.
 ## What is Nexa?
 
 Nexa is a voice assistant that runs entirely on your machine. Wake-word
-detection, speech-to-text, and text-to-speech all happen locally —
-nothing is sent to the cloud.
+detection, speech-to-text, and text-to-speech all happen locally, and
+nothing leaves your computer automatically. The one opt-in exception is
+web search, which sends your query using your own API key — see
+[Privacy & Data](#privacy--data) below for the full picture.
 
 - **Wake word** — say "Hey Nexa" to activate, powered by openWakeWord
 - **Speech-to-text** — Whisper.cpp running fully offline
-- **Text-to-speech** — Piper, with Amy and Ryan voices included
-- **Nexa Studio** — build your own custom trigger → action commands
+- **Text-to-speech** — Piper, with a choice of voices
+- **Command pill** — a small, fast popup you can type or speak into,
+  triggered by a global hotkey, for quick commands without opening the
+  full window
+- **Nexa Studio** — build your own custom trigger → action commands,
+  with import/export so you can back up or share your commands
 - **App integrations** — other apps can register their own voice
   commands with Nexa over D-Bus
+- **Conversational small talk** — ask Nexa personal questions like
+  "where were you born?" or "do you sleep?"
+- **Web search** — optional, opt-in, using your own API key; see
+  [Privacy](#privacy--data) below
 - **Everyday features** — weather, jokes, facts, riddles, media and
   system controls, background/tray mode, global hotkey, and more
 
@@ -76,9 +86,21 @@ detects whether Nexa is already installed and shows the right menu.
 
 ## Status
 
-Nexa is still in active development and not yet on Flathub. Expect
-rough edges. Bug reports, feedback, and ideas for what to build next
-are all welcome.
+Nexa is tagged as beta — still under active development, not yet on
+Flathub, and not fully stable yet. Expect rough edges. Bug reports,
+feedback, and ideas for what to build next are all welcome.
+
+## Privacy & Data
+
+Nothing leaves your computer automatically. The one opt-in exception is
+web search, which uses your own API key and sends only your query.
+
+Nexa can optionally save short "Hey Nexa" wake word clips on your
+device to help improve the wake word model. This is off by default,
+stays local unless you choose to export and email it to me, and I
+delete anything sent to me once training is done — I don't sell it,
+share it, or use it for anything else. See
+[docs/TRAINING_DATA.md](docs/TRAINING_DATA.md) for the full explanation.
 
 ## License
 
